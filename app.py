@@ -6,6 +6,7 @@ matplotlib.use('Agg')  # menggunakan mode non-GUI
 import matplotlib.pyplot as plt
 import os
 import time
+import json
 from datetime import datetime
 from collections import deque
 import threading
@@ -13,7 +14,7 @@ import math
 import mysql.connector
 from mysql.connector import Error
 import base64
-import json
+import paho.mqtt.client as mqtt_client
 
 app = Flask(__name__)
 
@@ -21,6 +22,12 @@ app = Flask(__name__)
 THINGSBOARD_TOKEN = 'r7DUFq0R2PXLNNvmSZwp'
 THINGSBOARD_URL = f"https://demo.thingsboard.io/api/v1/{THINGSBOARD_TOKEN}/telemetry"
 UPLOAD_FOLDER = 'static'
+
+# Konfigurasi MQTT Broker untuk Flask
+FLASK_MQTT_BROKER = "localhost"  # Ganti dengan IP server Flask jika berbeda
+FLASK_MQTT_PORT = 1883
+FLASK_MQTT_TOPIC = "sensor/road_monitoring"
+FLASK_RESPONSE_TOPIC = "sensor/road_monitoring/response"
 
 # Konfigurasi MySQL Database
 DB_CONFIG = {
@@ -55,6 +62,158 @@ data_lock = threading.Lock()
 VIBRATION_THRESHOLD = 2000  # Threshold untuk deteksi getaran
 ROTATION_THRESHOLD = 500    # Threshold untuk deteksi rotasi
 DISTANCE_CHANGE_THRESHOLD = 2  # Threshold perubahan jarak (cm)
+
+# MQTT Client untuk Flask
+mqtt_client_flask = None
+mqtt_connected = False
+
+def setup_mqtt_client():
+    """Setup MQTT client untuk menerima data dari ESP32"""
+    global mqtt_client_flask, mqtt_connected
+    
+    def on_connect(client, userdata, flags, rc):
+        global mqtt_connected
+        if rc == 0:
+            print("✅ MQTT Client terhubung ke broker")
+            mqtt_connected = True
+            client.subscribe(FLASK_MQTT_TOPIC)
+            print(f"📡 Subscribed to topic: {FLASK_MQTT_TOPIC}")
+        else:
+            print(f"❌ Gagal terhubung ke MQTT broker, return code {rc}")
+            mqtt_connected = False
+    
+    def on_disconnect(client, userdata, rc):
+        global mqtt_connected
+        mqtt_connected = False
+        print(f"🔌 MQTT Client terputus, return code {rc}")
+    
+    def on_message(client, userdata, msg):
+        """Callback ketika menerima pesan MQTT dari ESP32"""
+        try:
+            # Decode pesan JSON
+            payload = msg.payload.decode('utf-8')
+            print(f"📩 MQTT Data diterima dari ESP32: {payload}")
+            
+            data = json.loads(payload)
+            process_sensor_data(data)
+            
+            # Kirim response ke ESP32 (opsional)
+            response = {
+                "status": "received",
+                "timestamp": datetime.now().isoformat(),
+                "data_processed": True
+            }
+            client.publish(FLASK_RESPONSE_TOPIC, json.dumps(response))
+            
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing JSON dari MQTT: {e}")
+        except Exception as e:
+            print(f"❌ Error processing MQTT message: {e}")
+    
+    # Setup MQTT client
+    mqtt_client_flask = mqtt_client.Client()
+    mqtt_client_flask.on_connect = on_connect
+    mqtt_client_flask.on_disconnect = on_disconnect
+    mqtt_client_flask.on_message = on_message
+    
+    try:
+        mqtt_client_flask.connect(FLASK_MQTT_BROKER, FLASK_MQTT_PORT, 60)
+        mqtt_client_flask.loop_start()  # Start loop in background thread
+        print("🚀 MQTT Client dimulai...")
+    except Exception as e:
+        print(f"❌ Gagal memulai MQTT client: {e}")
+
+def process_sensor_data(data):
+    """Memproses data sensor yang diterima dari ESP32 (via MQTT atau HTTP)"""
+    global last_saved_time
+    
+    print("📊 Memproses data sensor...")
+    
+    # Catat waktu penerimaan data
+    current_time = time.time()
+    current_timestamp = datetime.now().strftime('%H:%M:%S')
+    
+    # Kirim ke ThingsBoard (backup/redundancy)
+    try:
+        response = requests.post(THINGSBOARD_URL, json=data, timeout=5)
+        print("✅ Kirim ke ThingsBoard:", response.status_code)
+    except Exception as e:
+        print("❌ Gagal kirim ke ThingsBoard:", e)
+        response = None
+    
+    # Proses data ultrasonic
+    current_distances = [data.get(f'sensor{i+1}', -1) for i in range(8)]
+    
+    # Proses data GPS
+    gps_data = {
+        'latitude': data.get('latitude', None),
+        'longitude': data.get('longitude', None),
+        'speed': data.get('speed', None),
+        'satellites': data.get('satellites', None)
+    }
+    
+    # Proses data motion sensor (MPU6050)
+    motion_data = {
+        'accelX': data.get('accelX', None),
+        'accelY': data.get('accelY', None),
+        'accelZ': data.get('accelZ', None),
+        'gyroX': data.get('gyroX', None),
+        'gyroY': data.get('gyroY', None),
+        'gyroZ': data.get('gyroZ', None)
+    }
+    
+    # Update history data dengan thread safety
+    with data_lock:
+        timestamp_history.append(current_timestamp)
+        
+        # Update ultrasonic data history
+        for i in range(8):
+            sensor_name = f'sensor{i+1}'
+            sensor_data_history[sensor_name].append(current_distances[i])
+        
+        # Update GPS data history
+        if gps_data['latitude'] is not None:
+            gps_data_history['latitude'].append(gps_data['latitude'])
+            gps_data_history['longitude'].append(gps_data['longitude'])
+        
+        # Update motion data history
+        for key in motion_data:
+            if motion_data[key] is not None:
+                motion_data_history[key].append(motion_data[key])
+    
+    # Deteksi anomali
+    anomalies = detect_anomalies(current_distances, motion_data, gps_data)
+    
+    # Cek apakah perlu menyimpan visualisasi
+    should_save = len(anomalies) > 0
+    comprehensive_plot_path = None
+    
+    # Simpan gambar jika kondisi terpenuhi dan cooldown telah lewat
+    if should_save and (current_time - last_saved_time) >= SAVE_COOLDOWN:
+        try:
+            comprehensive_plot_path = save_comprehensive_plots(anomalies)
+            last_saved_time = current_time
+            
+            # Simpan setiap anomali ke database
+            for anomaly in anomalies:
+                save_anomaly_to_database(
+                    anomaly, 
+                    current_distances, 
+                    motion_data, 
+                    gps_data, 
+                    comprehensive_plot_path
+                )
+                
+        except Exception as e:
+            print("❌ Gagal menyimpan visualisasi:", e)
+    
+    # Visualisasi data terbaru
+    try:
+        create_current_data_visualization(current_distances, motion_data, gps_data)
+    except Exception as e:
+        print("❌ Gagal buat visualisasi data terbaru:", e)
+    
+    print(f"✅ Data berhasil diproses. Anomali: {len(anomalies)}")
 
 def get_db_connection():
     """Membuat koneksi ke database MySQL"""
@@ -166,106 +325,21 @@ def save_anomaly_to_database(anomaly_data, sensor_data, motion_data, gps_data, i
             cursor.close()
             connection.close()
 
+# Endpoint HTTP untuk backward compatibility dan testing
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
-    global last_saved_time
-    
+    """Endpoint HTTP untuk backward compatibility"""
     data = request.get_json()
-    print("📩 Multi-sensor data diterima dari ESP32:", data)
+    print("📩 HTTP Multi-sensor data diterima:", data)
     
-    # Catat waktu penerimaan data
-    current_time = time.time()
-    current_timestamp = datetime.now().strftime('%H:%M:%S')
-    
-    # Kirim ke ThingsBoard
-    try:
-        response = requests.post(THINGSBOARD_URL, json=data)
-        print("✅ Kirim ke ThingsBoard:", response.status_code, response.text)
-    except Exception as e:
-        print("❌ Gagal kirim ke ThingsBoard:", e)
-        response = None
-    
-    # Proses data ultrasonic
-    current_distances = [data.get(f'sensor{i+1}', -1) for i in range(8)]
-    
-    # Proses data GPS
-    gps_data = {
-        'latitude': data.get('latitude', None),
-        'longitude': data.get('longitude', None),
-        'speed': data.get('speed', None),
-        'satellites': data.get('satellites', None)
-    }
-    
-    # Proses data motion sensor (MPU6050)
-    motion_data = {
-        'accelX': data.get('accelX', None),
-        'accelY': data.get('accelY', None),
-        'accelZ': data.get('accelZ', None),
-        'gyroX': data.get('gyroX', None),
-        'gyroY': data.get('gyroY', None),
-        'gyroZ': data.get('gyroZ', None)
-    }
-    
-    # Update history data dengan thread safety
-    with data_lock:
-        timestamp_history.append(current_timestamp)
-        
-        # Update ultrasonic data history
-        for i in range(8):
-            sensor_name = f'sensor{i+1}'
-            sensor_data_history[sensor_name].append(current_distances[i])
-        
-        # Update GPS data history
-        if gps_data['latitude'] is not None:
-            gps_data_history['latitude'].append(gps_data['latitude'])
-            gps_data_history['longitude'].append(gps_data['longitude'])
-        
-        # Update motion data history
-        for key in motion_data:
-            if motion_data[key] is not None:
-                motion_data_history[key].append(motion_data[key])
-    
-    # Deteksi anomali
-    anomalies = detect_anomalies(current_distances, motion_data, gps_data)
-    
-    # Cek apakah perlu menyimpan visualisasi
-    should_save = len(anomalies) > 0
-    comprehensive_plot_path = None
-    
-    # Simpan gambar jika kondisi terpenuhi dan cooldown telah lewat
-    if should_save and (current_time - last_saved_time) >= SAVE_COOLDOWN:
-        try:
-            comprehensive_plot_path = save_comprehensive_plots(anomalies)
-            last_saved_time = current_time
-            
-            # Simpan setiap anomali ke database
-            for anomaly in anomalies:
-                save_anomaly_to_database(
-                    anomaly, 
-                    current_distances, 
-                    motion_data, 
-                    gps_data, 
-                    comprehensive_plot_path
-                )
-                
-        except Exception as e:
-            print("❌ Gagal menyimpan visualisasi:", e)
-    
-    # Visualisasi data terbaru
-    try:
-        create_current_data_visualization(current_distances, motion_data, gps_data)
-    except Exception as e:
-        print("❌ Gagal buat visualisasi data terbaru:", e)
+    process_sensor_data(data)
     
     return jsonify({
         "status": "success",
-        "thingsboard_response": response.text if response else "Failed to send",
-        "anomalies_detected": anomalies,
-        "anomalies_saved_to_db": len(anomalies) if should_save else 0,
+        "message": "Data processed via HTTP",
+        "mqtt_connected": mqtt_connected,
         "current_data_image": "/static/current_data.png",
-        "comprehensive_plot": "/static/comprehensive_plot.png" if should_save else None,
-        "gps_valid": gps_data['latitude'] is not None,
-        "motion_sensor_active": any(v is not None for v in motion_data.values())
+        "comprehensive_plot": "/static/comprehensive_plot.png"
     }), 200
 
 # Endpoint untuk backward compatibility
@@ -519,6 +593,7 @@ def status():
         return jsonify({
             "system_status": "running",
             "data_points": len(timestamp_history),
+            "mqtt_connected": mqtt_connected,
             "sensors_active": {
                 "ultrasonic": len([s for s in sensor_data_history.values() if len(s) > 0]),
                 "gps": len(gps_data_history['latitude']) > 0,
@@ -526,7 +601,7 @@ def status():
             },
             "last_update": list(timestamp_history)[-1] if len(timestamp_history) > 0 else "Never"
         })
-
+        
 @app.route('/anomalies', methods=['GET'])
 def get_anomalies():
     """Endpoint untuk mengambil data anomali dari database"""
@@ -590,6 +665,9 @@ if __name__ == '__main__':
     print("   - GET  /status       : System status check")
     print("   - GET  /anomalies    : Get anomaly records from database")
     print("🌐 Server running on http://0.0.0.0:5000")
+    
+    # Setup MQTT client sebelum menjalankan server
+    setup_mqtt_client()
     
     # Test database connection
     test_conn = get_db_connection()
