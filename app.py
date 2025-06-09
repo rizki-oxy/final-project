@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-import requests
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # menggunakan mode non-GUI
@@ -18,11 +17,6 @@ import paho.mqtt.client as mqtt_client
 
 app = Flask(__name__)
 
-# Konfigurasi ThingsBoard
-THINGSBOARD_TOKEN = 'r7DUFq0R2PXLNNvmSZwp'
-THINGSBOARD_URL = f"https://demo.thingsboard.io/api/v1/{THINGSBOARD_TOKEN}/telemetry"
-UPLOAD_FOLDER = 'static'
-
 # Konfigurasi MQTT Broker untuk Flask
 FLASK_MQTT_BROKER = "localhost"  # Ganti dengan IP server Flask jika berbeda
 FLASK_MQTT_PORT = 1883
@@ -40,6 +34,7 @@ DB_CONFIG = {
 }
 
 # Pastikan folder static ada
+UPLOAD_FOLDER = 'static'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
@@ -132,14 +127,6 @@ def process_sensor_data(data):
     # Catat waktu penerimaan data
     current_time = time.time()
     current_timestamp = datetime.now().strftime('%H:%M:%S')
-    
-    # Kirim ke ThingsBoard (backup/redundancy)
-    try:
-        response = requests.post(THINGSBOARD_URL, json=data, timeout=5)
-        print("✅ Kirim ke ThingsBoard:", response.status_code)
-    except Exception as e:
-        print("❌ Gagal kirim ke ThingsBoard:", e)
-        response = None
     
     # Proses data ultrasonic
     current_distances = [data.get(f'sensor{i+1}', -1) for i in range(8)]
@@ -325,10 +312,10 @@ def save_anomaly_to_database(anomaly_data, sensor_data, motion_data, gps_data, i
             cursor.close()
             connection.close()
 
-# Endpoint HTTP untuk backward compatibility dan testing
+# Endpoint HTTP untuk menerima data sensor
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
-    """Endpoint HTTP untuk backward compatibility"""
+    """Endpoint untuk menerima data sensor dari ESP32"""
     data = request.get_json()
     print("📩 HTTP Multi-sensor data diterima:", data)
     
@@ -341,12 +328,6 @@ def multisensor():
         "current_data_image": "/static/current_data.png",
         "comprehensive_plot": "/static/comprehensive_plot.png"
     }), 200
-
-# Endpoint untuk backward compatibility
-@app.route('/ultrasonic', methods=['POST'])
-def ultrasonic():
-    """Endpoint untuk kompatibilitas dengan kode lama"""
-    return multisensor()
 
 def detect_anomalies(distances, motion_data, gps_data):
     """Deteksi berbagai jenis anomali berdasarkan data sensor"""
@@ -661,7 +642,6 @@ if __name__ == '__main__':
     print("🚀 Multi-Sensor Flask Server with MySQL Starting...")
     print("📡 Endpoints available:")
     print("   - POST /multisensor  : Main endpoint for ESP32 data")
-    print("   - POST /ultrasonic   : Backward compatibility endpoint")
     print("   - GET  /status       : System status check")
     print("   - GET  /anomalies    : Get anomaly records from database")
     print("🌐 Server running on http://0.0.0.0:5000")

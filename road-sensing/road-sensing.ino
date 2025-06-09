@@ -29,9 +29,9 @@ PubSubClient client(espClient);
 #define SDA_PIN 21
 #define SCL_PIN 22
 
-// Ultrasonic Sensor Pins (Updated to avoid conflicts)
+// Ultrasonic Sensor Pins
 int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};      // Trigger pins
-int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};   // Echo pins (changed pin 21,22 to 32,35)
+int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};   // Echo pins
 
 // GPS Objects
 TinyGPSPlus gps;
