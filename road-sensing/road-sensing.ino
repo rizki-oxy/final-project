@@ -1,31 +1,22 @@
 #include <WiFi.h>
 #include <TinyGPS++.h>
 #include <Wire.h>
+#include <HTTPClient.h>
 #include <PubSubClient.h>
-#include <ArduinoJson.h>
 
-// WiFi Configuration
+// WiFi & MQTT Configuration
 const char* ssid = "MOMO";
 const char* password = "1sampai8";
-
-// MQTT Configuration
 const char* mqtt_server = "demo.thingsboard.io";
 const int mqtt_port = 1883;
-const char* thingsboard_token = "r7DUFq0R2PXLNNvmSZwp";
-
-// Flask MQTT Configuration (assuming Flask MQTT broker is running)
-const char* flask_mqtt_server = "192.168.18.38";  // IP address of Flask server
-const int flask_mqtt_port = 1883;
-const char* flask_topic = "sensor/road_monitoring";
+const char* access_token = "r7DUFq0R2PXLNNvmSZwp";
 
 WiFiClient espClient;
-PubSubClient thingsboard_client(espClient);
-WiFiClient flaskClient;
-PubSubClient flask_client(flaskClient);
+PubSubClient client(espClient);
 
 // GPS Configuration
-#define GPS_RX_PIN 16
-#define GPS_TX_PIN 17
+#define GPS_RX_PIN 16  // ESP32 menerima data dari GPS
+#define GPS_TX_PIN 17  // ESP32 mengirim data ke GPS
 #define GPS_BAUD 9600
 
 // MPU6050 Configuration
@@ -34,13 +25,13 @@ PubSubClient flask_client(flaskClient);
 #define ACCEL_XOUT_H 0x3B
 #define GYRO_XOUT_H 0x43
 
-// ESP32 I2C Pins
+// ESP32 I2C Pins (Reserved for GY-521)
 #define SDA_PIN 21
 #define SCL_PIN 22
 
-// Ultrasonic Sensor Pins
-int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};
-int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};
+// Ultrasonic Sensor Pins (Updated to avoid conflicts)
+int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};      // Trigger pins
+int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};   // Echo pins (changed pin 21,22 to 32,35)
 
 // GPS Objects
 TinyGPSPlus gps;
@@ -48,7 +39,7 @@ HardwareSerial GPSSerial(2);
 
 // GPS Variables
 unsigned long lastGPSCheckTime = 0;
-const unsigned long gpsCheckInterval = 3000;
+const unsigned long gpsCheckInterval = 3000;  // Check GPS every 3 seconds
 unsigned long lastGPSDataTime = 0;
 const unsigned long gpsDataTimeout = 5000;
 bool gpsHardwareConnected = false;
@@ -65,20 +56,16 @@ float vibrationThreshold = 2.0;
 float rotationThreshold = 500;
 bool sensorDetected = false;
 unsigned long lastSensorCheckTime = 0;
-const unsigned long sensorCheckInterval = 1000;
+const unsigned long sensorCheckInterval = 1000;  // Check sensor every 1 second
 
 // Ultrasonic Variables
 unsigned long lastUltrasonicTime = 0;
-const unsigned long ultrasonicInterval = 1000;
+const unsigned long ultrasonicInterval = 1000;  // Read ultrasonic every 1 second
 float distances[8];
 
 // System Variables
 unsigned long lastDataSendTime = 0;
-const unsigned long dataSendInterval = 2000;
-
-// Connection status
-bool thingsboard_connected = false;
-bool flask_connected = false;
+const unsigned long dataSendInterval = 2000;  // Send data every 2 seconds
 
 void setup() {
   Serial.begin(115200);
@@ -86,14 +73,13 @@ void setup() {
   
   Serial.println("\n=== ESP32 Multi-Sensor System ===");
   Serial.println("GPS + GY-521 + Ultrasonic Array");
-  Serial.println("MQTT Communication Only");
   Serial.println("=================================");
   
   // Initialize WiFi
   setup_wifi();
   
-  // Initialize MQTT clients
-  setup_mqtt_clients();
+  // Initialize MQTT
+  client.setServer(mqtt_server, mqtt_port);
   
   // Initialize I2C for MPU6050
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -132,8 +118,11 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
   
-  // Maintain MQTT connections
-  maintainMQTTConnections();
+  // Maintain MQTT connection
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
   
   // Process GPS data continuously
   processGPSData(currentTime);
@@ -158,7 +147,7 @@ void loop() {
   
   // Send all data periodically
   if (currentTime - lastDataSendTime >= dataSendInterval) {
-    sendAllSensorDataMQTT();
+    sendAllSensorData();
     lastDataSendTime = currentTime;
   }
   
@@ -184,90 +173,17 @@ void setup_wifi() {
   }
 }
 
-void setup_mqtt_clients() {
-  // Setup ThingsBoard MQTT client
-  thingsboard_client.setServer(mqtt_server, mqtt_port);
-  thingsboard_client.setCallback(thingsboard_callback);
-  
-  // Setup Flask MQTT client
-  flask_client.setServer(flask_mqtt_server, flask_mqtt_port);
-  flask_client.setCallback(flask_callback);
-  
-  Serial.println("📡 MQTT clients configured");
-}
-
-void maintainMQTTConnections() {
-  // Maintain ThingsBoard connection
-  if (!thingsboard_client.connected()) {
-    reconnect_thingsboard();
-  } else {
-    thingsboard_client.loop();
-  }
-  
-  // Maintain Flask MQTT connection
-  if (!flask_client.connected()) {
-    reconnect_flask();
-  } else {
-    flask_client.loop();
-  }
-}
-
-void reconnect_thingsboard() {
-  static unsigned long lastReconnectAttempt = 0;
-  unsigned long now = millis();
-  
-  if (now - lastReconnectAttempt > 5000) {
-    lastReconnectAttempt = now;
-    
-    Serial.print("🔄 Menghubungkan ke ThingsBoard MQTT...");
-    if (thingsboard_client.connect("ESP32MultiSensor", thingsboard_token, NULL)) {
-      Serial.println(" ✅ ThingsBoard MQTT terhubung");
-      thingsboard_connected = true;
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("🔄 Hubungkan MQTT...");
+    if (client.connect("ESP32MultiSensor", access_token, NULL)) {
+      Serial.println(" ✅ MQTT terhubung");
     } else {
       Serial.print(" ❌ Gagal, rc=");
-      Serial.println(thingsboard_client.state());
-      thingsboard_connected = false;
+      Serial.print(client.state());
+      delay(5000);
     }
   }
-}
-
-void reconnect_flask() {
-  static unsigned long lastReconnectAttempt = 0;
-  unsigned long now = millis();
-  
-  if (now - lastReconnectAttempt > 5000) {
-    lastReconnectAttempt = now;
-    
-    Serial.print("🔄 Menghubungkan ke Flask MQTT...");
-    if (flask_client.connect("ESP32FlaskClient")) {
-      Serial.println(" ✅ Flask MQTT terhubung");
-      flask_connected = true;
-      // Subscribe to any response topics if needed
-      flask_client.subscribe("sensor/road_monitoring/response");
-    } else {
-      Serial.print(" ❌ Gagal, rc=");
-      Serial.println(flask_client.state());
-      flask_connected = false;
-    }
-  }
-}
-
-void thingsboard_callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("📩 ThingsBoard message received: ");
-  Serial.println(topic);
-  // Handle ThingsBoard responses if needed
-}
-
-void flask_callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("📩 Flask message received: ");
-  Serial.println(topic);
-  
-  // Convert payload to string
-  String message = "";
-  for (int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
-  Serial.println("Message: " + message);
 }
 
 void processGPSData(unsigned long currentTime) {
@@ -419,69 +335,57 @@ void readAllUltrasonicSensors() {
   }
 }
 
-void sendAllSensorDataMQTT() {
+void sendAllSensorData() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️ WiFi not connected, skipping data send");
     return;
   }
   
-  // Create JSON payload using ArduinoJson library
-  StaticJsonDocument<1024> doc;
-  
-  // Add timestamp
-  doc["timestamp"] = millis();
+  // Create comprehensive JSON payload
+  String payload = "{";
   
   // GPS Data
   if (gps.location.isValid()) {
-    doc["latitude"] = gps.location.lat();
-    doc["longitude"] = gps.location.lng();
+    payload += "\"latitude\":" + String(gps.location.lat(), 6) + ",";
+    payload += "\"longitude\":" + String(gps.location.lng(), 6) + ",";
   }
   if (gps.speed.isValid()) {
-    doc["speed"] = gps.speed.kmph();
+    payload += "\"speed\":" + String(gps.speed.kmph()) + ",";
   }
   if (gps.satellites.isValid()) {
-    doc["satellites"] = gps.satellites.value();
+    payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
   // Motion Sensor Data
   if (sensorDetected) {
-    doc["accelX"] = accelX;
-    doc["accelY"] = accelY;
-    doc["accelZ"] = accelZ;
-    doc["gyroX"] = gyroX;
-    doc["gyroY"] = gyroY;
-    doc["gyroZ"] = gyroZ;
+    payload += "\"accelX\":" + String(accelX) + ",";
+    payload += "\"accelY\":" + String(accelY) + ",";
+    payload += "\"accelZ\":" + String(accelZ) + ",";
+    payload += "\"gyroX\":" + String(gyroX) + ",";
+    payload += "\"gyroY\":" + String(gyroY) + ",";
+    payload += "\"gyroZ\":" + String(gyroZ) + ",";
   }
   
   // Ultrasonic Data
   for (int i = 0; i < 8; i++) {
-    String sensorKey = "sensor" + String(i + 1);
-    doc[sensorKey] = distances[i];
+    payload += "\"sensor" + String(i + 1) + "\":" + String(distances[i]);
+    if (i < 7) payload += ",";
   }
   
-  // Convert to string
-  String payload;
-  serializeJson(doc, payload);
+  payload += "}";
   
-  // Send to ThingsBoard
-  if (thingsboard_connected) {
-    bool tb_success = thingsboard_client.publish("v1/devices/me/telemetry", payload.c_str());
-    Serial.print("📡 ThingsBoard MQTT: ");
-    Serial.println(tb_success ? "✅ Success" : "❌ Failed");
-  }
+  // Send to Flask server
+  HTTPClient http;
+  http.begin("http://192.168.18.38:5000/multisensor");
+  http.addHeader("Content-Type", "application/json");
+  int httpResponseCode = http.POST(payload);
+  Serial.print("📡 Flask response: ");
+  Serial.println(httpResponseCode);
+  http.end();
   
-  // Send to Flask via MQTT
-  if (flask_connected) {
-    bool flask_success = flask_client.publish(flask_topic, payload.c_str());
-    Serial.print("📡 Flask MQTT: ");
-    Serial.println(flask_success ? "✅ Success" : "❌ Failed");
-  }
-  
-  // Print connection status
-  Serial.print("🔗 Connections - TB: ");
-  Serial.print(thingsboard_connected ? "✅" : "❌");
-  Serial.print(" | Flask: ");
-  Serial.println(flask_connected ? "✅" : "❌");
+  // Send to MQTT (ThingsBoard)
+  Serial.println("📡 Sending to MQTT: " + payload);
+  client.publish("v1/devices/me/telemetry", payload.c_str());
   
   Serial.println("=================================");
 }
