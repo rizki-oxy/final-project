@@ -5,8 +5,8 @@
 #include <PubSubClient.h>
 
 // WiFi & MQTT Configuration
-const char* ssid = "MOMO";
-const char* password = "1sampai8";
+const char* ssid = "fff";
+const char* password = "halo1234000";
 const char* mqtt_server = "demo.thingsboard.io";
 const int mqtt_port = 1883;
 const char* access_token = "r7DUFq0R2PXLNNvmSZwp";

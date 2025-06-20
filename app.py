@@ -1,206 +1,69 @@
 from flask import Flask, request, jsonify
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # menggunakan mode non-GUI
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 import threading
 import math
 import mysql.connector
 from mysql.connector import Error
 import base64
-import paho.mqtt.client as mqtt_client
+from dotenv import load_dotenv
+from thresholds import *
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 
-# Konfigurasi MQTT Broker untuk Flask
-FLASK_MQTT_BROKER = "localhost"  # Ganti dengan IP server Flask jika berbeda
-FLASK_MQTT_PORT = 1883
-FLASK_MQTT_TOPIC = "sensor/road_monitoring"
-FLASK_RESPONSE_TOPIC = "sensor/road_monitoring/response"
-
-# Konfigurasi MySQL Database
+# Konfigurasi dari .env
 DB_CONFIG = {
-    'host': 'localhost',
-    'database': 'road_monitoring',
-    'user': 'root',  # sesuaikan dengan username MySQL Anda
-    'password': '',  # sesuaikan dengan password MySQL Anda
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_NAME', 'road_monitoring'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', ''),
     'charset': 'utf8mb4',
     'autocommit': True
 }
 
-# Pastikan folder static ada
-UPLOAD_FOLDER = 'static'
+UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'static')
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# Variabel untuk menyimpan data time series (30 detik terakhir)
-MAX_TIME_WINDOW = 30  # 30 detik
-sensor_data_history = {f'sensor{i+1}': deque(maxlen=MAX_TIME_WINDOW) for i in range(8)}
-gps_data_history = {'latitude': deque(maxlen=MAX_TIME_WINDOW), 'longitude': deque(maxlen=MAX_TIME_WINDOW)}
-motion_data_history = {
-    'accelX': deque(maxlen=MAX_TIME_WINDOW), 'accelY': deque(maxlen=MAX_TIME_WINDOW), 'accelZ': deque(maxlen=MAX_TIME_WINDOW),
-    'gyroX': deque(maxlen=MAX_TIME_WINDOW), 'gyroY': deque(maxlen=MAX_TIME_WINDOW), 'gyroZ': deque(maxlen=MAX_TIME_WINDOW)
-}
-timestamp_history = deque(maxlen=MAX_TIME_WINDOW)
-last_saved_time = 0
-SAVE_COOLDOWN = 5  # minimal jeda 5 detik antara penyimpanan gambar
-
-# Lock untuk thread safety saat akses data history
-data_lock = threading.Lock()
-
-# Threshold untuk deteksi anomali
-VIBRATION_THRESHOLD = 2000  # Threshold untuk deteksi getaran
-ROTATION_THRESHOLD = 500    # Threshold untuk deteksi rotasi
-DISTANCE_CHANGE_THRESHOLD = 2  # Threshold perubahan jarak (cm)
-
-# MQTT Client untuk Flask
-mqtt_client_flask = None
-mqtt_connected = False
-
-def setup_mqtt_client():
-    """Setup MQTT client untuk menerima data dari ESP32"""
-    global mqtt_client_flask, mqtt_connected
+# Data storage untuk analisis 30 detik
+class DataBuffer:
+    def __init__(self, max_duration=30):
+        self.max_duration = max_duration
+        self.data_points = deque()
+        self.lock = threading.Lock()
     
-    def on_connect(client, userdata, flags, rc):
-        global mqtt_connected
-        if rc == 0:
-            print("✅ MQTT Client terhubung ke broker")
-            mqtt_connected = True
-            client.subscribe(FLASK_MQTT_TOPIC)
-            print(f"📡 Subscribed to topic: {FLASK_MQTT_TOPIC}")
-        else:
-            print(f"❌ Gagal terhubung ke MQTT broker, return code {rc}")
-            mqtt_connected = False
-    
-    def on_disconnect(client, userdata, rc):
-        global mqtt_connected
-        mqtt_connected = False
-        print(f"🔌 MQTT Client terputus, return code {rc}")
-    
-    def on_message(client, userdata, msg):
-        """Callback ketika menerima pesan MQTT dari ESP32"""
-        try:
-            # Decode pesan JSON
-            payload = msg.payload.decode('utf-8')
-            print(f"📩 MQTT Data diterima dari ESP32: {payload}")
+    def add_data(self, data):
+        with self.lock:
+            current_time = datetime.now()
+            data['timestamp'] = current_time
+            self.data_points.append(data)
             
-            data = json.loads(payload)
-            process_sensor_data(data)
-            
-            # Kirim response ke ESP32 (opsional)
-            response = {
-                "status": "received",
-                "timestamp": datetime.now().isoformat(),
-                "data_processed": True
-            }
-            client.publish(FLASK_RESPONSE_TOPIC, json.dumps(response))
-            
-        except json.JSONDecodeError as e:
-            print(f"❌ Error parsing JSON dari MQTT: {e}")
-        except Exception as e:
-            print(f"❌ Error processing MQTT message: {e}")
+            # Hapus data yang lebih dari 30 detik
+            cutoff_time = current_time - timedelta(seconds=self.max_duration)
+            while self.data_points and self.data_points[0]['timestamp'] < cutoff_time:
+                self.data_points.popleft()
     
-    # Setup MQTT client
-    mqtt_client_flask = mqtt_client.Client()
-    mqtt_client_flask.on_connect = on_connect
-    mqtt_client_flask.on_disconnect = on_disconnect
-    mqtt_client_flask.on_message = on_message
+    def get_data(self):
+        with self.lock:
+            return list(self.data_points)
     
-    try:
-        mqtt_client_flask.connect(FLASK_MQTT_BROKER, FLASK_MQTT_PORT, 60)
-        mqtt_client_flask.loop_start()  # Start loop in background thread
-        print("🚀 MQTT Client dimulai...")
-    except Exception as e:
-        print(f"❌ Gagal memulai MQTT client: {e}")
+    def get_data_count(self):
+        with self.lock:
+            return len(self.data_points)
 
-def process_sensor_data(data):
-    """Memproses data sensor yang diterima dari ESP32 (via MQTT atau HTTP)"""
-    global last_saved_time
-    
-    print("📊 Memproses data sensor...")
-    
-    # Catat waktu penerimaan data
-    current_time = time.time()
-    current_timestamp = datetime.now().strftime('%H:%M:%S')
-    
-    # Proses data ultrasonic
-    current_distances = [data.get(f'sensor{i+1}', -1) for i in range(8)]
-    
-    # Proses data GPS
-    gps_data = {
-        'latitude': data.get('latitude', None),
-        'longitude': data.get('longitude', None),
-        'speed': data.get('speed', None),
-        'satellites': data.get('satellites', None)
-    }
-    
-    # Proses data motion sensor (MPU6050)
-    motion_data = {
-        'accelX': data.get('accelX', None),
-        'accelY': data.get('accelY', None),
-        'accelZ': data.get('accelZ', None),
-        'gyroX': data.get('gyroX', None),
-        'gyroY': data.get('gyroY', None),
-        'gyroZ': data.get('gyroZ', None)
-    }
-    
-    # Update history data dengan thread safety
-    with data_lock:
-        timestamp_history.append(current_timestamp)
-        
-        # Update ultrasonic data history
-        for i in range(8):
-            sensor_name = f'sensor{i+1}'
-            sensor_data_history[sensor_name].append(current_distances[i])
-        
-        # Update GPS data history
-        if gps_data['latitude'] is not None:
-            gps_data_history['latitude'].append(gps_data['latitude'])
-            gps_data_history['longitude'].append(gps_data['longitude'])
-        
-        # Update motion data history
-        for key in motion_data:
-            if motion_data[key] is not None:
-                motion_data_history[key].append(motion_data[key])
-    
-    # Deteksi anomali
-    anomalies = detect_anomalies(current_distances, motion_data, gps_data)
-    
-    # Cek apakah perlu menyimpan visualisasi
-    should_save = len(anomalies) > 0
-    comprehensive_plot_path = None
-    
-    # Simpan gambar jika kondisi terpenuhi dan cooldown telah lewat
-    if should_save and (current_time - last_saved_time) >= SAVE_COOLDOWN:
-        try:
-            comprehensive_plot_path = save_comprehensive_plots(anomalies)
-            last_saved_time = current_time
-            
-            # Simpan setiap anomali ke database
-            for anomaly in anomalies:
-                save_anomaly_to_database(
-                    anomaly, 
-                    current_distances, 
-                    motion_data, 
-                    gps_data, 
-                    comprehensive_plot_path
-                )
-                
-        except Exception as e:
-            print("❌ Gagal menyimpan visualisasi:", e)
-    
-    # Visualisasi data terbaru
-    try:
-        create_current_data_visualization(current_distances, motion_data, gps_data)
-    except Exception as e:
-        print("❌ Gagal buat visualisasi data terbaru:", e)
-    
-    print(f"✅ Data berhasil diproses. Anomali: {len(anomalies)}")
+# Global data buffer
+data_buffer = DataBuffer(ANALYSIS_INTERVAL)
+last_analysis_time = 0
 
 def get_db_connection():
     """Membuat koneksi ke database MySQL"""
@@ -212,8 +75,8 @@ def get_db_connection():
         print(f"❌ Error connecting to MySQL: {e}")
         return None
 
-def save_anomaly_to_database(anomaly_data, sensor_data, motion_data, gps_data, image_path=None):
-    """Menyimpan data anomali ke database MySQL"""
+def save_sensor_data(data):
+    """Menyimpan data sensor mentah ke database"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -221,371 +84,524 @@ def save_anomaly_to_database(anomaly_data, sensor_data, motion_data, gps_data, i
     try:
         cursor = connection.cursor()
         
-        # Encode gambar ke base64 jika ada
-        image_data = None
-        if image_path and os.path.exists(image_path):
-            with open(image_path, 'rb') as img_file:
-                image_data = base64.b64encode(img_file.read()).decode('utf-8')
-        
-        # Prepare data untuk insert
         insert_query = """
-        INSERT INTO anomaly_records (
-            timestamp, anomaly_type, anomaly_details,
-            sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
+        INSERT INTO sensor_data (
+            timestamp, sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
             sensor5_distance, sensor6_distance, sensor7_distance, sensor8_distance,
             accel_x, accel_y, accel_z, accel_magnitude,
             gyro_x, gyro_y, gyro_z, rotation_magnitude,
-            latitude, longitude, speed, satellites,
-            image_data, image_filename
+            latitude, longitude, speed, satellites
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """
         
-        # Hitung magnitude untuk motion data
+        # Calculate magnitudes
         accel_magnitude = None
+        if all(data.get(key) is not None for key in ['accelX', 'accelY', 'accelZ']):
+            accel_magnitude = math.sqrt(data['accelX']**2 + data['accelY']**2 + data['accelZ']**2)
+        
         rotation_magnitude = None
-        
-        if all(motion_data.get(key) is not None for key in ['accelX', 'accelY', 'accelZ']):
-            accel_magnitude = math.sqrt(
-                motion_data['accelX']**2 + 
-                motion_data['accelY']**2 + 
-                motion_data['accelZ']**2
-            )
-        
-        if all(motion_data.get(key) is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
+        if all(data.get(key) is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
             rotation_magnitude = math.sqrt(
-                (motion_data['gyroX']/131.0)**2 + 
-                (motion_data['gyroY']/131.0)**2 + 
-                (motion_data['gyroZ']/131.0)**2
+                (data['gyroX']/131.0)**2 + (data['gyroY']/131.0)**2 + (data['gyroZ']/131.0)**2
             )
         
-        # Data untuk insert
         insert_data = (
-            datetime.now(),  # timestamp
-            anomaly_data.get('type', 'unknown'),  # anomaly_type
-            json.dumps(anomaly_data),  # anomaly_details (JSON string)
-            
-            # Ultrasonic sensor data (8 sensors)
-            sensor_data[0] if len(sensor_data) > 0 else None,
-            sensor_data[1] if len(sensor_data) > 1 else None,
-            sensor_data[2] if len(sensor_data) > 2 else None,
-            sensor_data[3] if len(sensor_data) > 3 else None,
-            sensor_data[4] if len(sensor_data) > 4 else None,
-            sensor_data[5] if len(sensor_data) > 5 else None,
-            sensor_data[6] if len(sensor_data) > 6 else None,
-            sensor_data[7] if len(sensor_data) > 7 else None,
-            
-            # Motion sensor data
-            motion_data.get('accelX'),
-            motion_data.get('accelY'),
-            motion_data.get('accelZ'),
-            accel_magnitude,
-            motion_data.get('gyroX'),
-            motion_data.get('gyroY'),
-            motion_data.get('gyroZ'),
-            rotation_magnitude,
-            
-            # GPS data
-            gps_data.get('latitude'),
-            gps_data.get('longitude'),
-            gps_data.get('speed'),
-            gps_data.get('satellites'),
-            
-            # Image data
-            image_data,
-            os.path.basename(image_path) if image_path else None
+            datetime.now(),
+            data.get('sensor1'), data.get('sensor2'), data.get('sensor3'), data.get('sensor4'),
+            data.get('sensor5'), data.get('sensor6'), data.get('sensor7'), data.get('sensor8'),
+            data.get('accelX'), data.get('accelY'), data.get('accelZ'), accel_magnitude,
+            data.get('gyroX'), data.get('gyroY'), data.get('gyroZ'), rotation_magnitude,
+            data.get('latitude'), data.get('longitude'), data.get('speed'), data.get('satellites')
         )
         
         cursor.execute(insert_query, insert_data)
         connection.commit()
-        
-        print(f"✅ Data anomali berhasil disimpan ke database: {anomaly_data.get('type')}")
         return True
         
     except Error as e:
-        print(f"❌ Error saving to database: {e}")
+        print(f"❌ Error saving sensor data: {e}")
         return False
     finally:
         if connection.is_connected():
             cursor.close()
             connection.close()
 
-# Endpoint HTTP untuk menerima data sensor
-@app.route('/multisensor', methods=['POST'])
-def multisensor():
-    """Endpoint untuk menerima data sensor dari ESP32"""
-    data = request.get_json()
-    print("📩 HTTP Multi-sensor data diterima:", data)
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Menghitung jarak antara dua koordinat GPS dalam meter"""
+    if any(coord is None for coord in [lat1, lon1, lat2, lon2]):
+        return 0
     
-    process_sensor_data(data)
+    # Convert to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     
-    return jsonify({
-        "status": "success",
-        "message": "Data processed via HTTP",
-        "mqtt_connected": mqtt_connected,
-        "current_data_image": "/static/current_data.png",
-        "comprehensive_plot": "/static/comprehensive_plot.png"
-    }), 200
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    return EARTH_RADIUS * c
 
-def detect_anomalies(distances, motion_data, gps_data):
-    """Deteksi berbagai jenis anomali berdasarkan data sensor"""
+def analyze_surface_changes(data_points):
+    """Analisis perubahan permukaan jalan dari data ultrasonic"""
+    changes = []
+    change_counts = 0
+    
+    for i in range(1, len(data_points)):
+        prev_data = data_points[i-1]
+        curr_data = data_points[i]
+        
+        for sensor_idx in range(1, 9):
+            sensor_key = f'sensor{sensor_idx}'
+            prev_val = prev_data.get(sensor_key)
+            curr_val = curr_data.get(sensor_key)
+            
+            if prev_val is not None and curr_val is not None and prev_val != -1 and curr_val != -1:
+                change = abs(curr_val - prev_val)
+                if change >= SURFACE_CHANGE_THRESHOLDS['minor']:
+                    changes.append(change)
+                    change_counts += 1
+    
+    return {
+        'changes': changes,
+        'max_change': max(changes) if changes else 0,
+        'avg_change': sum(changes) / len(changes) if changes else 0,
+        'count': change_counts
+    }
+
+def analyze_vibrations(data_points):
+    """Analisis guncangan dari data accelerometer"""
+    vibrations = []
+    vibration_counts = 0
+    
+    for i in range(1, len(data_points)):
+        prev_data = data_points[i-1]
+        curr_data = data_points[i]
+        
+        # Calculate acceleration magnitude changes
+        if all(key in prev_data and key in curr_data for key in ['accelX', 'accelY', 'accelZ']):
+            if all(prev_data[key] is not None and curr_data[key] is not None 
+                   for key in ['accelX', 'accelY', 'accelZ']):
+                
+                prev_mag = math.sqrt(prev_data['accelX']**2 + prev_data['accelY']**2 + prev_data['accelZ']**2)
+                curr_mag = math.sqrt(curr_data['accelX']**2 + curr_data['accelY']**2 + curr_data['accelZ']**2)
+                
+                vibration = abs(curr_mag - prev_mag)
+                if vibration >= VIBRATION_THRESHOLDS['light']:
+                    vibrations.append(vibration)
+                    vibration_counts += 1
+    
+    return {
+        'vibrations': vibrations,
+        'max_vibration': max(vibrations) if vibrations else 0,
+        'avg_vibration': sum(vibrations) / len(vibrations) if vibrations else 0,
+        'count': vibration_counts
+    }
+
+def analyze_rotations(data_points):
+    """Analisis rotasi berlebihan dari data gyroscope"""
+    rotations = []
+    
+    for data in data_points:
+        if all(key in data and data[key] is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
+            # Convert to degrees per second
+            rotX = abs(data['gyroX'] / 131.0)
+            rotY = abs(data['gyroY'] / 131.0)
+            rotZ = abs(data['gyroZ'] / 131.0)
+            
+            max_rotation = max(rotX, rotY, rotZ)
+            if max_rotation >= ROTATION_THRESHOLDS['normal']:
+                rotations.append(max_rotation)
+    
+    return {
+        'rotations': rotations,
+        'max_rotation': max(rotations) if rotations else 0,
+        'avg_rotation': sum(rotations) / len(rotations) if rotations else 0,
+        'count': len(rotations)
+    }
+
+def calculate_damage_length(data_points):
+    """Menghitung panjang kerusakan berdasarkan data GPS"""
+    gps_points = []
+    
+    for data in data_points:
+        if data.get('latitude') is not None and data.get('longitude') is not None:
+            gps_points.append((data['latitude'], data['longitude']))
+    
+    if len(gps_points) < 2:
+        return 0
+    
+    total_distance = 0
+    for i in range(1, len(gps_points)):
+        distance = calculate_distance(
+            gps_points[i-1][0], gps_points[i-1][1],
+            gps_points[i][0], gps_points[i][1]
+        )
+        
+        # Skip jika jarak terlalu jauh (mungkin error GPS)
+        if distance <= MAX_GPS_GAP:
+            total_distance += distance
+    
+    return total_distance
+
+def detect_anomalies(data_points):
+    """Deteksi semua anomali dalam periode analisis"""
     anomalies = []
     
-    # 1. Deteksi perubahan permukaan jalan (ultrasonic)
-    with data_lock:
-        if len(list(sensor_data_history.values())[0]) >= 2:
-            for i in range(8):
-                sensor_name = f'sensor{i+1}'
-                if len(sensor_data_history[sensor_name]) >= 2:
-                    last_idx = len(sensor_data_history[sensor_name]) - 1
-                    current = sensor_data_history[sensor_name][last_idx]
-                    previous = sensor_data_history[sensor_name][last_idx - 1]
-                    if abs(current - previous) > DISTANCE_CHANGE_THRESHOLD:
-                        anomalies.append({
-                            'type': 'surface_change',
-                            'sensor': sensor_name,
-                            'change': abs(current - previous),
-                            'previous': previous,
-                            'current': current,
-                            'severity': 'high' if abs(current - previous) > 5 else 'medium'
-                        })
-                        print(f"⚠️ Perubahan permukaan pada {sensor_name}: {previous} -> {current}")
-    
-    # 2. Deteksi getaran/guncangan (accelerometer)
-    if all(motion_data[key] is not None for key in ['accelX', 'accelY', 'accelZ']):
-        accel_magnitude = math.sqrt(motion_data['accelX']**2 + motion_data['accelY']**2 + motion_data['accelZ']**2)
-        
-        with data_lock:
-            if len(motion_data_history['accelX']) >= 2:
-                prev_accelX = motion_data_history['accelX'][-2]
-                prev_accelY = motion_data_history['accelY'][-2] 
-                prev_accelZ = motion_data_history['accelZ'][-2]
-                prev_magnitude = math.sqrt(prev_accelX**2 + prev_accelY**2 + prev_accelZ**2)
-                
-                accel_change = abs(accel_magnitude - prev_magnitude)
-                if accel_change > VIBRATION_THRESHOLD:
-                    anomalies.append({
-                        'type': 'vibration',
-                        'magnitude': accel_magnitude,
-                        'change': accel_change,
-                        'severity': 'critical' if accel_change > 5000 else 'high'
-                    })
-                    print(f"📳 Getaran terdeteksi: {accel_change}")
-    
-    # 3. Deteksi rotasi berlebihan (gyroscope)
-    if all(motion_data[key] is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
-        # Konversi ke degrees per second
-        rotX = motion_data['gyroX'] / 131.0
-        rotY = motion_data['gyroY'] / 131.0
-        rotZ = motion_data['gyroZ'] / 131.0
-        
-        if abs(rotX) > ROTATION_THRESHOLD or abs(rotY) > ROTATION_THRESHOLD or abs(rotZ) > ROTATION_THRESHOLD:
-            max_rotation = max(abs(rotX), abs(rotY), abs(rotZ))
-            anomalies.append({
-                'type': 'excessive_rotation',
-                'rotX': rotX,
-                'rotY': rotY,
-                'rotZ': rotZ,
-                'max_rotation': max_rotation,
-                'severity': 'critical' if max_rotation > 1000 else 'high'
-            })
-            print(f"🔄 Rotasi berlebihan: X={rotX}, Y={rotY}, Z={rotZ}")
-    
-    # 4. Deteksi kecepatan tinggi (GPS)
-    if gps_data.get('speed') is not None and gps_data['speed'] > 80:  # > 80 km/h
+    # Analisis perubahan permukaan
+    surface_analysis = analyze_surface_changes(data_points)
+    if surface_analysis['count'] > 0:
         anomalies.append({
-            'type': 'high_speed',
-            'speed': gps_data['speed'],
-            'severity': 'critical' if gps_data['speed'] > 120 else 'medium'
+            'type': 'surface_change',
+            'details': surface_analysis,
+            'severity': get_surface_change_severity(surface_analysis['max_change'])
         })
-        print(f"🚗 Kecepatan tinggi: {gps_data['speed']} km/h")
+    
+    # Analisis guncangan
+    vibration_analysis = analyze_vibrations(data_points)
+    if vibration_analysis['count'] > 0:
+        anomalies.append({
+            'type': 'vibration',
+            'details': vibration_analysis,
+            'severity': get_vibration_severity(vibration_analysis['max_vibration'])
+        })
+    
+    # Analisis rotasi
+    rotation_analysis = analyze_rotations(data_points)
+    if rotation_analysis['count'] > 0:
+        anomalies.append({
+            'type': 'rotation',
+            'details': rotation_analysis,
+            'severity': get_rotation_severity(rotation_analysis['max_rotation'])
+        })
     
     return anomalies
 
-def create_current_data_visualization(distances, motion_data, gps_data):
-    """Membuat visualisasi komprehensif data terbaru"""
+def create_analysis_visualization(analysis_data):
+    """Membuat visualisasi analisis untuk disimpan"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Buat subplot untuk berbagai jenis data
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    
-    # 1. Ultrasonic sensor data
-    ax1.bar(range(1, 9), distances, color='skyblue')
-    ax1.set_title('Data Sensor Ultrasonik Terbaru')
-    ax1.set_xlabel('Sensor ke-')
-    ax1.set_ylabel('Jarak (cm)')
-    ax1.set_xticks(range(1, 9))
-    ax1.grid(True, axis='y')
-    
-    # 2. Accelerometer data
-    if all(motion_data[key] is not None for key in ['accelX', 'accelY', 'accelZ']):
-        accel_values = [motion_data['accelX'], motion_data['accelY'], motion_data['accelZ']]
-        ax2.bar(['X', 'Y', 'Z'], accel_values, color=['red', 'green', 'blue'])
-        ax2.set_title('Data Accelerometer')
-        ax2.set_ylabel('Nilai Raw')
-        ax2.grid(True, axis='y')
-    else:
-        ax2.text(0.5, 0.5, 'Motion Sensor\nTidak Tersedia', ha='center', va='center', transform=ax2.transAxes)
-        ax2.set_title('Data Accelerometer')
-    
-    # 3. Gyroscope data
-    if all(motion_data[key] is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
-        gyro_values = [motion_data['gyroX']/131.0, motion_data['gyroY']/131.0, motion_data['gyroZ']/131.0]
-        ax3.bar(['X', 'Y', 'Z'], gyro_values, color=['orange', 'purple', 'brown'])
-        ax3.set_title('Data Gyroscope')
-        ax3.set_ylabel('Derajat/detik')
-        ax3.grid(True, axis='y')
-    else:
-        ax3.text(0.5, 0.5, 'Gyroscope\nTidak Tersedia', ha='center', va='center', transform=ax3.transAxes)
-        ax3.set_title('Data Gyroscope')
-    
-    # 4. GPS info
-    if gps_data.get('latitude') is not None:
-        info_text = f"📍 Lat: {gps_data['latitude']:.6f}\n"
-        info_text += f"📍 Lng: {gps_data['longitude']:.6f}\n"
-        if gps_data.get('speed') is not None:
-            info_text += f"🚗 Speed: {gps_data['speed']:.1f} km/h\n"
-        if gps_data.get('satellites') is not None:
-            info_text += f"🛰️ Satellites: {gps_data['satellites']}"
+    # 1. Data perubahan permukaan (Time Series Line Chart)
+    if analysis_data['surface_analysis']['changes']:
+        # Create time index for changes
+        time_points = list(range(len(analysis_data['surface_analysis']['changes'])))
         
-        ax4.text(0.1, 0.5, info_text, ha='left', va='center', transform=ax4.transAxes, fontsize=12)
-        ax4.set_title('Data GPS')
-        ax4.axis('off')
+        ax1.plot(time_points, analysis_data['surface_analysis']['changes'], 
+                marker='o', linewidth=2, markersize=4, color='orange', alpha=0.8)
+        ax1.axhline(y=analysis_data['surface_analysis']['max_change'], 
+                   color='red', linestyle='--', alpha=0.7,
+                   label=f'Max: {analysis_data["surface_analysis"]["max_change"]:.1f}cm')
+        ax1.axhline(y=analysis_data['surface_analysis']['avg_change'], 
+                   color='blue', linestyle=':', alpha=0.7,
+                   label=f'Avg: {analysis_data["surface_analysis"]["avg_change"]:.1f}cm')
+        
+        ax1.fill_between(time_points, analysis_data['surface_analysis']['changes'], 
+                        alpha=0.3, color='orange')
+        ax1.set_title('Perubahan Permukaan Jalan (Time Series)')
+        ax1.set_xlabel('Urutan Deteksi')
+        ax1.set_ylabel('Perubahan (cm)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
     else:
-        ax4.text(0.5, 0.5, 'GPS\nTidak Tersedia', ha='center', va='center', transform=ax4.transAxes)
-        ax4.set_title('Data GPS')
-        ax4.axis('off')
+        ax1.text(0.5, 0.5, 'Tidak ada perubahan\npermukaan signifikan', 
+                ha='center', va='center', transform=ax1.transAxes, fontsize=14)
+        ax1.set_title('Perubahan Permukaan Jalan (Time Series)')
+    
+    # 2. Data guncangan (Time Series Line Chart)
+    if analysis_data['vibration_analysis']['vibrations']:
+        time_points = list(range(len(analysis_data['vibration_analysis']['vibrations'])))
+        
+        ax2.plot(time_points, analysis_data['vibration_analysis']['vibrations'], 
+                marker='s', linewidth=2, markersize=4, color='red', alpha=0.8)
+        ax2.axhline(y=analysis_data['vibration_analysis']['max_vibration'], 
+                   color='darkred', linestyle='--', alpha=0.7,
+                   label=f'Max: {analysis_data["vibration_analysis"]["max_vibration"]:.0f}')
+        ax2.axhline(y=analysis_data['vibration_analysis']['avg_vibration'], 
+                   color='blue', linestyle=':', alpha=0.7,
+                   label=f'Avg: {analysis_data["vibration_analysis"]["avg_vibration"]:.0f}')
+        
+        ax2.fill_between(time_points, analysis_data['vibration_analysis']['vibrations'], 
+                        alpha=0.3, color='red')
+        ax2.set_title('Intensitas Guncangan (Time Series)')
+        ax2.set_xlabel('Urutan Deteksi')
+        ax2.set_ylabel('Intensitas Guncangan')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax2.text(0.5, 0.5, 'Tidak ada guncangan\nsignifikan', 
+                ha='center', va='center', transform=ax2.transAxes, fontsize=14)
+        ax2.set_title('Intensitas Guncangan (Time Series)')
+    
+    # 3. Panjang kerusakan dan lokasi
+    info_text = f"📏 Panjang Kerusakan: {analysis_data['damage_length']:.1f} meter\n\n"
+    info_text += f"🏁 Lokasi Awal:\n"
+    if analysis_data['start_location']:
+        info_text += f"   Lat: {analysis_data['start_location'][0]:.6f}\n"
+        info_text += f"   Lng: {analysis_data['start_location'][1]:.6f}\n\n"
+    else:
+        info_text += f"   GPS tidak tersedia\n\n"
+    
+    info_text += f"🏁 Lokasi Akhir:\n"
+    if analysis_data['end_location']:
+        info_text += f"   Lat: {analysis_data['end_location'][0]:.6f}\n"
+        info_text += f"   Lng: {analysis_data['end_location'][1]:.6f}\n\n"
+    else:
+        info_text += f"   GPS tidak tersedia\n\n"
+    
+    info_text += f"⏱️ Durasi Analisis: {analysis_data['duration']:.1f} detik\n"
+    info_text += f"📊 Jumlah Data: {analysis_data['data_count']} titik"
+    
+    ax3.text(0.05, 0.95, info_text, ha='left', va='top', transform=ax3.transAxes, 
+            fontsize=11, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.7))
+    ax3.set_title('Data Panjang Kerusakan Jalan')
+    ax3.axis('off')
+    
+    # 4. Klasifikasi dan anomali dengan trend visualization
+    classification_text = f"🏗️ KLASIFIKASI KERUSAKAN:\n"
+    classification_text += f"   {analysis_data['damage_classification'].upper().replace('_', ' ')}\n\n"
+    classification_text += f"🎯 SKOR KERUSAKAN: {analysis_data['damage_score']:.2f}\n\n"
+    
+    classification_text += f"⚠️ ANOMALI TERDETEKSI:\n"
+    for anomaly in analysis_data['anomalies']:
+        classification_text += f"• {anomaly['type'].replace('_', ' ').title()}: {anomaly['severity']}\n"
+    
+    if not analysis_data['anomalies']:
+        classification_text += "• Tidak ada anomali signifikan\n"
+    
+    # Color based on classification
+    color_map = {
+        'rusak_ringan': 'lightgreen',
+        'rusak_sedang': 'yellow', 
+        'rusak_berat': 'lightcoral'
+    }
+    bg_color = color_map.get(analysis_data['damage_classification'], 'lightgray')
+    
+    ax4.text(0.05, 0.95, classification_text, ha='left', va='top', transform=ax4.transAxes, 
+            fontsize=11, bbox=dict(boxstyle="round,pad=0.5", facecolor=bg_color, alpha=0.8))
+    ax4.set_title('Klasifikasi Kerusakan Jalan')
+    ax4.axis('off')
     
     plt.tight_layout()
-    current_chart_path = os.path.join(UPLOAD_FOLDER, 'current_data.png')
-    plt.savefig(current_chart_path, dpi=100, bbox_inches='tight')
-    plt.close()
-    print("📷 Visualisasi data terbaru disimpan:", current_chart_path)
-
-def save_comprehensive_plots(anomalies):
-    """Menyimpan plot komprehensif saat ada anomali"""
     
-    with data_lock:
-        if len(timestamp_history) < 2:
-            print("⚠️ Tidak cukup data untuk membuat time series")
-            return None
+    # Save dengan timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'road_analysis_{timestamp}.png'
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    plt.savefig(filepath, dpi=100, bbox_inches='tight')
+    plt.close()
+    
+    return filepath, filename
+
+def save_analysis_to_database(analysis_data, image_path, image_filename):
+    """Menyimpan hasil analisis ke database"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor()
         
-        # Buat figure dengan multiple subplots
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        # Encode image to base64
+        image_data = None
+        if image_path and os.path.exists(image_path):
+            with open(image_path, 'rb') as img_file:
+                image_data = base64.b64encode(img_file.read()).decode('utf-8')
         
-        # 1. Time series ultrasonic sensors
-        colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-        for i in range(8):
-            sensor_name = f'sensor{i+1}'
-            if len(sensor_data_history[sensor_name]) > 0:
-                ax1.plot(
-                    list(timestamp_history), 
-                    list(sensor_data_history[sensor_name]),
-                    label=sensor_name,
-                    color=colors[i],
-                    marker='o',
-                    markersize=2,
-                    linewidth=1
-                )
+        insert_query = """
+        INSERT INTO road_damage_analysis (
+            analysis_timestamp, start_latitude, start_longitude, end_latitude, end_longitude,
+            damage_classification, damage_length, surface_change_max, surface_change_avg, surface_change_count,
+            vibration_max, vibration_avg, vibration_count, anomalies,
+            analysis_image, image_filename, data_points_count, analysis_duration
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """
         
-        ax1.set_title('Time Series - Sensor Ultrasonik (30s Terakhir)')
-        ax1.set_xlabel('Waktu')
-        ax1.set_ylabel('Jarak (cm)')
-        ax1.grid(True)
-        ax1.legend(loc='upper right', fontsize=8)
-        ax1.tick_params(axis='x', rotation=45)
+        start_lat = analysis_data['start_location'][0] if analysis_data['start_location'] else None
+        start_lng = analysis_data['start_location'][1] if analysis_data['start_location'] else None
+        end_lat = analysis_data['end_location'][0] if analysis_data['end_location'] else None
+        end_lng = analysis_data['end_location'][1] if analysis_data['end_location'] else None
         
-        # 2. Accelerometer time series
-        if len(motion_data_history['accelX']) > 0:
-            ax2.plot(list(timestamp_history)[-len(motion_data_history['accelX']):], 
-                    list(motion_data_history['accelX']), 'r-', label='AccelX')
-            ax2.plot(list(timestamp_history)[-len(motion_data_history['accelY']):], 
-                    list(motion_data_history['accelY']), 'g-', label='AccelY')
-            ax2.plot(list(timestamp_history)[-len(motion_data_history['accelZ']):], 
-                    list(motion_data_history['accelZ']), 'b-', label='AccelZ')
-            ax2.set_title('Time Series - Accelerometer')
-            ax2.set_xlabel('Waktu')
-            ax2.set_ylabel('Nilai Raw')
-            ax2.legend()
-            ax2.grid(True)
-            ax2.tick_params(axis='x', rotation=45)
-        else:
-            ax2.text(0.5, 0.5, 'Data Accelerometer\nTidak Tersedia', ha='center', va='center', transform=ax2.transAxes)
-            ax2.set_title('Time Series - Accelerometer')
+        insert_data = (
+            datetime.now(),  # analysis_timestamp
+            start_lat, start_lng, end_lat, end_lng,  # locations
+            analysis_data['damage_classification'],  # damage_classification
+            analysis_data['damage_length'],  # damage_length
+            analysis_data['surface_analysis']['max_change'],  # surface_change_max
+            analysis_data['surface_analysis']['avg_change'],  # surface_change_avg
+            analysis_data['surface_analysis']['count'],  # surface_change_count
+            analysis_data['vibration_analysis']['max_vibration'],  # vibration_max
+            analysis_data['vibration_analysis']['avg_vibration'],  # vibration_avg
+            analysis_data['vibration_analysis']['count'],  # vibration_count
+            json.dumps(analysis_data['anomalies']),  # anomalies (JSON)
+            image_data,  # analysis_image
+            image_filename,  # image_filename
+            analysis_data['data_count'],  # data_points_count
+            analysis_data['duration']  # analysis_duration
+        )
         
-        # 3. Gyroscope time series
-        if len(motion_data_history['gyroX']) > 0:
-            # Konversi ke degrees per second
-            gyroX_dps = [x/131.0 for x in motion_data_history['gyroX']]
-            gyroY_dps = [y/131.0 for y in motion_data_history['gyroY']]
-            gyroZ_dps = [z/131.0 for z in motion_data_history['gyroZ']]
-            
-            ax3.plot(list(timestamp_history)[-len(gyroX_dps):], gyroX_dps, 'r-', label='GyroX')
-            ax3.plot(list(timestamp_history)[-len(gyroY_dps):], gyroY_dps, 'g-', label='GyroY')
-            ax3.plot(list(timestamp_history)[-len(gyroZ_dps):], gyroZ_dps, 'b-', label='GyroZ')
-            ax3.set_title('Time Series - Gyroscope')
-            ax3.set_xlabel('Waktu')
-            ax3.set_ylabel('Derajat/detik')
-            ax3.legend()
-            ax3.grid(True)
-            ax3.tick_params(axis='x', rotation=45)
-        else:
-            ax3.text(0.5, 0.5, 'Data Gyroscope\nTidak Tersedia', ha='center', va='center', transform=ax3.transAxes)
-            ax3.set_title('Time Series - Gyroscope')
+        cursor.execute(insert_query, insert_data)
+        connection.commit()
         
-        # 4. Anomaly summary
-        anomaly_text = "🚨 ANOMALI TERDETEKSI:\n\n"
-        for i, anomaly in enumerate(anomalies):
-            if anomaly['type'] == 'surface_change':
-                anomaly_text += f"• Perubahan permukaan {anomaly['sensor']}: {anomaly['change']:.1f}cm\n"
-            elif anomaly['type'] == 'vibration':
-                anomaly_text += f"• Getaran: {anomaly['change']:.0f}\n"
-            elif anomaly['type'] == 'excessive_rotation':
-                anomaly_text += f"• Rotasi berlebihan: X={anomaly['rotX']:.1f}°/s\n"
-            elif anomaly['type'] == 'high_speed':
-                anomaly_text += f"• Kecepatan tinggi: {anomaly['speed']:.1f} km/h\n"
+        print(f"✅ Analisis berhasil disimpan: {analysis_data['damage_classification']}")
+        return True
         
-        ax4.text(0.05, 0.95, anomaly_text, ha='left', va='top', transform=ax4.transAxes, 
-                fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
-        ax4.set_title('Ringkasan Anomali')
-        ax4.axis('off')
+    except Error as e:
+        print(f"❌ Error saving analysis: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+def perform_30s_analysis():
+    """Melakukan analisis komprehensif setiap 30 detik"""
+    global last_analysis_time
+    
+    current_time = time.time()
+    data_points = data_buffer.get_data()
+    
+    if len(data_points) < MIN_DATA_POINTS:
+        print(f"⏳ Data tidak cukup untuk analisis: {len(data_points)}/{MIN_DATA_POINTS}")
+        return
+    
+    print(f"🔍 Memulai analisis 30 detik dengan {len(data_points)} data points...")
+    
+    start_time = time.time()
+    
+    # Analisis berbagai aspek
+    surface_analysis = analyze_surface_changes(data_points)
+    vibration_analysis = analyze_vibrations(data_points)
+    rotation_analysis = analyze_rotations(data_points)
+    damage_length = calculate_damage_length(data_points)
+    anomalies = detect_anomalies(data_points)
+    
+    # Tentukan lokasi awal dan akhir
+    start_location = None
+    end_location = None
+    
+    for data in data_points:
+        if data.get('latitude') is not None and data.get('longitude') is not None:
+            if start_location is None:
+                start_location = (data['latitude'], data['longitude'])
+            end_location = (data['latitude'], data['longitude'])
+    
+    # Hitung skor dan klasifikasi kerusakan
+    surface_changes = surface_analysis['changes']
+    vibrations = vibration_analysis['vibrations']
+    rotations = rotation_analysis['rotations']
+    frequency_factor = len(anomalies) / len(data_points) if data_points else 0
+    
+    damage_score = calculate_damage_score(surface_changes, vibrations, rotations, frequency_factor)
+    damage_classification = classify_damage(damage_score)
+    
+    # Compile analysis data
+    analysis_data = {
+        'surface_analysis': surface_analysis,
+        'vibration_analysis': vibration_analysis,
+        'rotation_analysis': rotation_analysis,
+        'damage_length': damage_length,
+        'anomalies': anomalies,
+        'damage_score': damage_score,
+        'damage_classification': damage_classification,
+        'start_location': start_location,
+        'end_location': end_location,
+        'data_count': len(data_points),
+        'duration': time.time() - start_time
+    }
+    
+    # Buat dan simpan visualisasi
+    try:
+        image_path, image_filename = create_analysis_visualization(analysis_data)
         
-        plt.tight_layout()
+        # Simpan ke database
+        save_analysis_to_database(analysis_data, image_path, image_filename)
         
-        # Simpan dengan timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filepath = os.path.join(UPLOAD_FOLDER, f'comprehensive_plot_{timestamp}.png')
-        plt.savefig(filepath, dpi=100, bbox_inches='tight')
+        print(f"✅ Analisis selesai - Klasifikasi: {damage_classification}")
+        print(f"📊 Skor kerusakan: {damage_score:.2f}")
+        print(f"📏 Panjang kerusakan: {damage_length:.1f}m")
+        print(f"⚠️ Anomali: {len(anomalies)}")
         
-        # Simpan juga dengan nama tetap untuk referensi API
-        fixed_filepath = os.path.join(UPLOAD_FOLDER, 'comprehensive_plot.png')
-        plt.savefig(fixed_filepath, dpi=100, bbox_inches='tight')
-        
-        plt.close()
-        print(f"📷 Plot komprehensif disimpan: {filepath}")
-        
-        return filepath
+    except Exception as e:
+        print(f"❌ Error dalam analisis: {e}")
+    
+    last_analysis_time = current_time
+
+@app.route('/multisensor', methods=['POST'])
+def multisensor():
+    """Endpoint untuk menerima data sensor dari ESP32"""
+    global last_analysis_time
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data received"}), 400
+    
+    print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
+    
+    # Simpan data mentah ke database
+    save_sensor_data(data)
+    
+    # Tambahkan ke buffer untuk analisis
+    data_buffer.add_data(data)
+    
+    # Cek apakah sudah waktunya untuk analisis 30 detik
+    current_time = time.time()
+    if (current_time - last_analysis_time) >= ANALYSIS_INTERVAL:
+        # Jalankan analisis di thread terpisah agar tidak blocking
+        analysis_thread = threading.Thread(target=perform_30s_analysis)
+        analysis_thread.daemon = True
+        analysis_thread.start()
+    
+    return jsonify({
+        "status": "success",
+        "message": "Data processed successfully",
+        "timestamp": datetime.now().isoformat(),
+        "data_buffer_count": data_buffer.get_data_count()
+    }), 200
 
 @app.route('/status', methods=['GET'])
 def status():
     """Endpoint untuk cek status sistem"""
-    with data_lock:
-        return jsonify({
-            "system_status": "running",
-            "data_points": len(timestamp_history),
-            "mqtt_connected": mqtt_connected,
-            "sensors_active": {
-                "ultrasonic": len([s for s in sensor_data_history.values() if len(s) > 0]),
-                "gps": len(gps_data_history['latitude']) > 0,
-                "motion": len(motion_data_history['accelX']) > 0
-            },
-            "last_update": list(timestamp_history)[-1] if len(timestamp_history) > 0 else "Never"
-        })
-        
-@app.route('/anomalies', methods=['GET'])
-def get_anomalies():
-    """Endpoint untuk mengambil data anomali dari database"""
+    data_points = data_buffer.get_data()
+    
+    # Analisis data terbaru
+    latest_data = data_points[-1] if data_points else {}
+    
+    # Status GPS
+    gps_status = "active" if latest_data.get('latitude') is not None else "inactive"
+    
+    # Status sensor ultrasonic
+    ultrasonic_active = sum(1 for i in range(1, 9) 
+                           if latest_data.get(f'sensor{i}') not in [None, -1])
+    
+    # Status motion sensor
+    motion_status = "active" if any(latest_data.get(key) is not None 
+                                  for key in ['accelX', 'accelY', 'accelZ']) else "inactive"
+    
+    return jsonify({
+        "system_status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "data_buffer": {
+            "count": len(data_points),
+            "max_duration": ANALYSIS_INTERVAL
+        },
+        "sensors": {
+            "ultrasonic_active": ultrasonic_active,
+            "ultrasonic_total": 8,
+            "motion_sensor": motion_status,
+            "gps": gps_status
+        },
+        "last_analysis": datetime.fromtimestamp(last_analysis_time).isoformat() if last_analysis_time > 0 else "Never",
+        "next_analysis_in": max(0, ANALYSIS_INTERVAL - (time.time() - last_analysis_time))
+    })
+
+@app.route('/analysis', methods=['GET'])
+def get_analysis():
+    """Endpoint untuk mengambil data analisis dari database"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
@@ -593,45 +609,97 @@ def get_anomalies():
     try:
         cursor = connection.cursor(dictionary=True)
         
-        # Parameter untuk pagination
-        limit = request.args.get('limit', 50, type=int)
+        # Parameter query
+        limit = request.args.get('limit', 20, type=int)
         offset = request.args.get('offset', 0, type=int)
-        anomaly_type = request.args.get('type', None)
+        classification = request.args.get('classification', None)
         
-        # Query dasar
-        base_query = "SELECT * FROM anomaly_records"
-        count_query = "SELECT COUNT(*) as total FROM anomaly_records"
+        # Base query
+        base_query = "SELECT * FROM road_damage_analysis"
+        count_query = "SELECT COUNT(*) as total FROM road_damage_analysis"
         
-        # Filter berdasarkan tipe anomali jika ada
+        # Filter
         where_clause = ""
         params = []
-        if anomaly_type:
-            where_clause = " WHERE anomaly_type = %s"
-            params = [anomaly_type]
+        if classification:
+            where_clause = " WHERE damage_classification = %s"
+            params = [classification]
         
-        # Query untuk menghitung total
+        # Get total count
         cursor.execute(count_query + where_clause, params)
         total_count = cursor.fetchone()['total']
         
-        # Query untuk data dengan pagination
-        main_query = base_query + where_clause + " ORDER BY timestamp DESC LIMIT %s OFFSET %s"
+        # Get data
+        main_query = base_query + where_clause + " ORDER BY analysis_timestamp DESC LIMIT %s OFFSET %s"
         cursor.execute(main_query, params + [limit, offset])
         
-        anomalies = cursor.fetchall()
+        analyses = cursor.fetchall()
         
-        # Convert JSON strings back to objects
-        for anomaly in anomalies:
-            if anomaly['anomaly_details']:
-                anomaly['anomaly_details'] = json.loads(anomaly['anomaly_details'])
+        # Parse JSON anomalies
+        for analysis in analyses:
+            if analysis['anomalies']:
+                analysis['anomalies'] = json.loads(analysis['anomalies'])
         
         return jsonify({
             "total": total_count,
-            "count": len(anomalies),
-            "anomalies": anomalies
+            "count": len(analyses),
+            "analyses": analyses
         })
         
     except Error as e:
-        print(f"❌ Error fetching anomalies: {e}")
+        print(f"❌ Error fetching analyses: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.route('/summary', methods=['GET'])
+def get_summary():
+    """Endpoint untuk mendapatkan ringkasan data kerusakan jalan"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        # Summary statistics
+        stats_query = """
+        SELECT 
+            damage_classification,
+            COUNT(*) as count,
+            AVG(damage_length) as avg_length,
+            SUM(damage_length) as total_length,
+            MAX(surface_change_max) as max_surface_change,
+            MAX(vibration_max) as max_vibration
+        FROM road_damage_analysis 
+        GROUP BY damage_classification
+        """
+        
+        cursor.execute(stats_query)
+        stats = cursor.fetchall()
+        
+        # Recent activity
+        recent_query = """
+        SELECT analysis_timestamp, damage_classification, damage_length, 
+               start_latitude, start_longitude, end_latitude, end_longitude
+        FROM road_damage_analysis 
+        ORDER BY analysis_timestamp DESC 
+        LIMIT 10
+        """
+        
+        cursor.execute(recent_query)
+        recent = cursor.fetchall()
+        
+        return jsonify({
+            "statistics": stats,
+            "recent_activity": recent,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Error as e:
+        print(f"❌ Error fetching summary: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if connection.is_connected():
@@ -639,15 +707,14 @@ def get_anomalies():
             connection.close()
 
 if __name__ == '__main__':
-    print("🚀 Multi-Sensor Flask Server with MySQL Starting...")
-    print("📡 Endpoints available:")
-    print("   - POST /multisensor  : Main endpoint for ESP32 data")
-    print("   - GET  /status       : System status check")
-    print("   - GET  /anomalies    : Get anomaly records from database")
-    print("🌐 Server running on http://0.0.0.0:5000")
-    
-    # Setup MQTT client sebelum menjalankan server
-    setup_mqtt_client()
+    print("🚀 Road Monitoring Flask Server Starting...")
+    print("=" * 50)
+    print("📡 Available Endpoints:")
+    print("   - POST /multisensor  : Receive ESP32 sensor data")
+    print("   - GET  /status       : System status")
+    print("   - GET  /analysis     : Get analysis results")
+    print("   - GET  /summary      : Get damage summary")
+    print("=" * 50)
     
     # Test database connection
     test_conn = get_db_connection()
@@ -655,6 +722,15 @@ if __name__ == '__main__':
         print("✅ Database connection successful")
         test_conn.close()
     else:
-        print("❌ Database connection failed - please check configuration")
+        print("❌ Database connection failed - check configuration")
+        exit(1)
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Start server
+    flask_host = os.getenv('FLASK_HOST', '0.0.0.0')
+    flask_port = int(os.getenv('FLASK_PORT', 5000))
+    flask_debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
+    
+    print(f"🌐 Server running on http://{flask_host}:{flask_port}")
+    print("=" * 50)
+    
+    app.run(host=flask_host, port=flask_port, debug=flask_debug)
