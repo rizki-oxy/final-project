@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 import os
 import time
 import json
+import requests
 from datetime import datetime, timedelta
-from collections import deque
 import threading
 import math
 import mysql.connector
@@ -31,6 +31,16 @@ DB_CONFIG = {
     'autocommit': True
 }
 
+# ThingsBoard Configuration
+THINGSBOARD_CONFIG = {
+    'server': os.getenv('THINGSBOARD_SERVER', '192.168.18.38'),
+    'port': os.getenv('THINGSBOARD_PORT', '8081'),
+    'access_token': os.getenv('THINGSBOARD_ACCESS_TOKEN', '0939gxC3IXo3uoCIgAED')
+}
+
+# Build ThingsBoard URL
+THINGSBOARD_URL = f"http://{THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}/api/v1/{THINGSBOARD_CONFIG['access_token']}/telemetry"
+
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'static')
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -39,7 +49,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 class DataBuffer:
     def __init__(self, max_duration=30):
         self.max_duration = max_duration
-        self.data_points = deque()
+        self.data_points = []
         self.lock = threading.Lock()
     
     def add_data(self, data):
@@ -50,8 +60,7 @@ class DataBuffer:
             
             # Hapus data yang lebih dari 30 detik
             cutoff_time = current_time - timedelta(seconds=self.max_duration)
-            while self.data_points and self.data_points[0]['timestamp'] < cutoff_time:
-                self.data_points.popleft()
+            self.data_points = [dp for dp in self.data_points if dp['timestamp'] >= cutoff_time]
     
     def get_data(self):
         with self.lock:
@@ -75,8 +84,166 @@ def get_db_connection():
         print(f"❌ Error connecting to MySQL: {e}")
         return None
 
+def send_to_thingsboard(payload_data, data_type="analysis"):
+    """Mengirim data ke ThingsBoard via HTTP"""
+    try:
+        # Add prefix to identify data source
+        prefixed_payload = {}
+        for key, value in payload_data.items():
+            prefixed_payload[f"fls_{key}"] = value
+        
+        # Add metadata
+        prefixed_payload["fls_data_source"] = "flask_server"
+        prefixed_payload["fls_data_type"] = data_type
+        prefixed_payload["fls_timestamp"] = datetime.now().isoformat()
+        
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(
+            THINGSBOARD_URL, 
+            json=prefixed_payload, 
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ ThingsBoard: {data_type} data sent successfully")
+            return True
+        else:
+            print(f"⚠️ ThingsBoard: HTTP {response.status_code} - {response.text}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ ThingsBoard connection error: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ ThingsBoard error: {e}")
+        return False
+
+def send_mysql_analysis_to_thingsboard(analysis_id=None, send_all=False, limit=50):
+    """Mengirim data analisis dari MySQL ke ThingsBoard dengan prefix fls_"""
+    connection = get_db_connection()
+    if not connection:
+        print("❌ Database connection failed for ThingsBoard sync")
+        return False
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        sent_count = 0
+        
+        if send_all:
+            # Kirim beberapa data terbaru
+            query = """
+            SELECT * FROM road_damage_analysis 
+            ORDER BY analysis_timestamp DESC 
+            LIMIT %s
+            """
+            cursor.execute(query, (limit,))
+            analyses = cursor.fetchall()
+            
+            print(f"🔄 Sending {len(analyses)} analysis records to ThingsBoard...")
+            
+        elif analysis_id:
+            # Kirim data spesifik berdasarkan ID
+            query = """
+            SELECT * FROM road_damage_analysis 
+            WHERE id = %s
+            """
+            cursor.execute(query, (analysis_id,))
+            analyses = cursor.fetchall()
+            
+        else:
+            # Kirim data terbaru saja
+            query = """
+            SELECT * FROM road_damage_analysis 
+            ORDER BY analysis_timestamp DESC 
+            LIMIT 1
+            """
+            cursor.execute(query)
+            analyses = cursor.fetchall()
+        
+        for analysis in analyses:
+            try:
+                # Parse anomalies JSON
+                anomalies_data = []
+                if analysis.get('anomalies'):
+                    try:
+                        anomalies_data = json.loads(analysis['anomalies'])
+                    except json.JSONDecodeError:
+                        anomalies_data = []
+                
+                # Create payload for ThingsBoard
+                thingsboard_payload = {
+                    "analysis_id": analysis['id'],
+                    "analysis_timestamp": analysis['analysis_timestamp'].isoformat() if analysis['analysis_timestamp'] else None,
+                    "start_latitude": float(analysis['start_latitude']) if analysis['start_latitude'] else None,
+                    "start_longitude": float(analysis['start_longitude']) if analysis['start_longitude'] else None,
+                    "end_latitude": float(analysis['end_latitude']) if analysis['end_latitude'] else None,
+                    "end_longitude": float(analysis['end_longitude']) if analysis['end_longitude'] else None,
+                    "damage_classification": analysis['damage_classification'],
+                    "damage_length": float(analysis['damage_length']) if analysis['damage_length'] else 0,
+                    "surface_change_max": float(analysis['surface_change_max']) if analysis['surface_change_max'] else 0,
+                    "surface_change_avg": float(analysis['surface_change_avg']) if analysis['surface_change_avg'] else 0,
+                    "surface_change_count": int(analysis['surface_change_count']) if analysis['surface_change_count'] else 0,
+                    "vibration_max": float(analysis['vibration_max']) if analysis['vibration_max'] else 0,
+                    "vibration_avg": float(analysis['vibration_avg']) if analysis['vibration_avg'] else 0,
+                    "vibration_count": int(analysis['vibration_count']) if analysis['vibration_count'] else 0,
+                    "data_points_count": int(analysis['data_points_count']) if analysis['data_points_count'] else 0,
+                    "analysis_duration": float(analysis['analysis_duration']) if analysis['analysis_duration'] else 0,
+                    "image_filename": analysis['image_filename'] if analysis['image_filename'] else None,
+                    "anomalies_count": len(anomalies_data),
+                }
+                
+                # Add anomaly details (up to 5 anomalies)
+                for i, anomaly in enumerate(anomalies_data[:5]):
+                    thingsboard_payload[f"anomaly_{i+1}_type"] = anomaly.get('type', 'unknown')
+                    thingsboard_payload[f"anomaly_{i+1}_severity"] = anomaly.get('severity', 'unknown')
+                
+                # Add image data as base64 if exists (optional - for small images only)
+                if analysis.get('analysis_image') and len(str(analysis['analysis_image'])) < 100000:  # Max 100KB
+                    thingsboard_payload["analysis_image_base64"] = analysis['analysis_image']
+                
+                # Calculate damage score for visualization
+                if analysis['surface_change_max'] and analysis['vibration_max']:
+                    damage_score = min(
+                        (float(analysis['surface_change_max']) / 10.0 * 0.4) +
+                        (float(analysis['vibration_max']) / 5000.0 * 0.3) +
+                        (len(anomalies_data) / 10.0 * 0.3), 1.0
+                    )
+                    thingsboard_payload["damage_score"] = round(damage_score, 3)
+                
+                # Remove None values
+                clean_payload = {k: v for k, v in thingsboard_payload.items() if v is not None}
+                
+                # Send to ThingsBoard
+                if send_to_thingsboard(clean_payload, "mysql_analysis"):
+                    sent_count += 1
+                    print(f"✅ Analysis ID {analysis['id']} sent to ThingsBoard")
+                else:
+                    print(f"❌ Failed to send Analysis ID {analysis['id']} to ThingsBoard")
+                
+                # Small delay to prevent overwhelming ThingsBoard
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"❌ Error processing analysis ID {analysis['id']}: {e}")
+                continue
+        
+        print(f"📊 MySQL to ThingsBoard sync completed: {sent_count}/{len(analyses)} records sent")
+        return sent_count > 0
+        
+    except Error as e:
+        print(f"❌ Error fetching analysis data: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
 def save_sensor_data(data):
-    """Menyimpan data sensor mentah ke database"""
+    """Menyimpan data sensor mentah ke database (TIDAK KIRIM KE THINGSBOARD)"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -119,6 +286,11 @@ def save_sensor_data(data):
         
         cursor.execute(insert_query, insert_data)
         connection.commit()
+        
+        print(f"✅ Raw sensor data saved to MySQL (ID: {cursor.lastrowid})")
+        # NOTE: Raw sensor data TIDAK dikirim ke ThingsBoard dari Flask
+        # karena ESP32 sudah mengirim data raw langsung ke ThingsBoard
+        
         return True
         
     except Error as e:
@@ -396,7 +568,7 @@ def create_analysis_visualization(analysis_data):
     return filepath, filename
 
 def save_analysis_to_database(analysis_data, image_path, image_filename):
-    """Menyimpan hasil analisis ke database"""
+    """Menyimpan hasil analisis ke database dan kirim ke ThingsBoard"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -447,7 +619,18 @@ def save_analysis_to_database(analysis_data, image_path, image_filename):
         cursor.execute(insert_query, insert_data)
         connection.commit()
         
+        # Get the inserted analysis ID
+        analysis_id = cursor.lastrowid
+        
         print(f"✅ Analisis berhasil disimpan: {analysis_data['damage_classification']}")
+        
+        # Send MySQL analysis data to ThingsBoard in background thread
+        threading.Thread(
+            target=send_mysql_analysis_to_thingsboard, 
+            args=(analysis_id,),
+            daemon=True
+        ).start()
+        
         return True
         
     except Error as e:
@@ -518,7 +701,7 @@ def perform_30s_analysis():
     try:
         image_path, image_filename = create_analysis_visualization(analysis_data)
         
-        # Simpan ke database
+        # Simpan ke database dan kirim ke ThingsBoard
         save_analysis_to_database(analysis_data, image_path, image_filename)
         
         print(f"✅ Analisis selesai - Klasifikasi: {damage_classification}")
@@ -531,6 +714,87 @@ def perform_30s_analysis():
     
     last_analysis_time = current_time
 
+def send_summary_to_thingsboard():
+    """Mengirim ringkasan data ke ThingsBoard"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        # Get recent statistics
+        stats_query = """
+        SELECT 
+            damage_classification,
+            COUNT(*) as count,
+            AVG(damage_length) as avg_length,
+            SUM(damage_length) as total_length,
+            MAX(surface_change_max) as max_surface_change,
+            MAX(vibration_max) as max_vibration,
+            AVG(surface_change_avg) as avg_surface_change,
+            AVG(vibration_avg) as avg_vibration
+        FROM road_damage_analysis 
+        WHERE analysis_timestamp >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        GROUP BY damage_classification
+        """
+        
+        cursor.execute(stats_query)
+        hourly_stats = cursor.fetchall()
+        
+        # Get total counts
+        total_query = """
+        SELECT 
+            COUNT(*) as total_analyses,
+            AVG(damage_length) as avg_total_length,
+            SUM(damage_length) as cumulative_length,
+            COUNT(DISTINCT DATE(analysis_timestamp)) as days_monitored,
+            MAX(analysis_timestamp) as last_analysis
+        FROM road_damage_analysis
+        """
+        
+        cursor.execute(total_query)
+        total_stats = cursor.fetchone()
+        
+        # Prepare summary payload
+        summary_payload = {
+            "total_analyses": int(total_stats['total_analyses'] or 0),
+            "avg_total_length": round(float(total_stats['avg_total_length'] or 0), 2),
+            "cumulative_damage_length": round(float(total_stats['cumulative_length'] or 0), 2),
+            "days_monitored": int(total_stats['days_monitored'] or 0),
+            "last_analysis": total_stats['last_analysis'].isoformat() if total_stats['last_analysis'] else None,
+            "rusak_ringan_count": 0,
+            "rusak_sedang_count": 0,
+            "rusak_berat_count": 0,
+            "rusak_ringan_avg_length": 0,
+            "rusak_sedang_avg_length": 0,
+            "rusak_berat_avg_length": 0
+        }
+        
+        # Add classification-specific data
+        for stat in hourly_stats:
+            classification = stat['damage_classification']
+            summary_payload[f"{classification}_count"] = int(stat['count'])
+            summary_payload[f"{classification}_avg_length"] = round(float(stat['avg_length'] or 0), 2)
+            summary_payload[f"{classification}_total_length"] = round(float(stat['total_length'] or 0), 2)
+            summary_payload[f"{classification}_max_surface_change"] = round(float(stat['max_surface_change'] or 0), 2)
+            summary_payload[f"{classification}_max_vibration"] = round(float(stat['max_vibration'] or 0), 2)
+            summary_payload[f"{classification}_avg_surface_change"] = round(float(stat['avg_surface_change'] or 0), 2)
+            summary_payload[f"{classification}_avg_vibration"] = round(float(stat['avg_vibration'] or 0), 2)
+        
+        # Send to ThingsBoard
+        send_to_thingsboard(summary_payload, "mysql_summary")
+        
+        return True
+        
+    except Error as e:
+        print(f"❌ Error getting summary data: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
     """Endpoint untuk menerima data sensor dari ESP32"""
@@ -542,7 +806,8 @@ def multisensor():
     
     print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
     
-    # Simpan data mentah ke database
+    # Simpan data mentah ke database (TANPA kirim ke ThingsBoard)
+    # karena ESP32 sudah mengirim data raw langsung ke ThingsBoard
     save_sensor_data(data)
     
     # Tambahkan ke buffer untuk analisis
@@ -558,9 +823,11 @@ def multisensor():
     
     return jsonify({
         "status": "success",
-        "message": "Data processed successfully",
+        "message": "Raw data saved to MySQL only (ESP32 handles ThingsBoard)",
         "timestamp": datetime.now().isoformat(),
-        "data_buffer_count": data_buffer.get_data_count()
+        "data_buffer_count": data_buffer.get_data_count(),
+        "mysql_integration": "active",
+        "note": "Analysis results will be sent to ThingsBoard with fls_ prefix"
     }), 200
 
 @app.route('/status', methods=['GET'])
@@ -582,6 +849,10 @@ def status():
     motion_status = "active" if any(latest_data.get(key) is not None 
                                   for key in ['accelX', 'accelY', 'accelZ']) else "inactive"
     
+    # Test ThingsBoard connection
+    test_payload = {"system_status": "testing", "test_timestamp": datetime.now().isoformat()}
+    thingsboard_status = "connected" if send_to_thingsboard(test_payload, "status_check") else "disconnected"
+    
     return jsonify({
         "system_status": "running",
         "timestamp": datetime.now().isoformat(),
@@ -594,6 +865,10 @@ def status():
             "ultrasonic_total": 8,
             "motion_sensor": motion_status,
             "gps": gps_status
+        },
+        "integrations": {
+            "thingsboard_status": thingsboard_status,
+            "thingsboard_url": THINGSBOARD_URL
         },
         "last_analysis": datetime.fromtimestamp(last_analysis_time).isoformat() if last_analysis_time > 0 else "Never",
         "next_analysis_in": max(0, ANALYSIS_INTERVAL - (time.time() - last_analysis_time))
@@ -613,6 +888,7 @@ def get_analysis():
         limit = request.args.get('limit', 20, type=int)
         offset = request.args.get('offset', 0, type=int)
         classification = request.args.get('classification', None)
+        send_to_tb = request.args.get('send_to_thingsboard', 'false').lower() == 'true'
         
         # Base query
         base_query = "SELECT * FROM road_damage_analysis"
@@ -638,12 +914,24 @@ def get_analysis():
         # Parse JSON anomalies
         for analysis in analyses:
             if analysis['anomalies']:
-                analysis['anomalies'] = json.loads(analysis['anomalies'])
+                try:
+                    analysis['anomalies'] = json.loads(analysis['anomalies'])
+                except json.JSONDecodeError:
+                    analysis['anomalies'] = []
+        
+        # Send to ThingsBoard if requested
+        if send_to_tb and analyses:
+            threading.Thread(
+                target=send_mysql_analysis_to_thingsboard,
+                args=(None, True, len(analyses)),
+                daemon=True
+            ).start()
         
         return jsonify({
             "total": total_count,
             "count": len(analyses),
-            "analyses": analyses
+            "analyses": analyses,
+            "thingsboard_sent": send_to_tb
         })
         
     except Error as e:
@@ -663,6 +951,7 @@ def get_summary():
     
     try:
         cursor = connection.cursor(dictionary=True)
+        send_to_tb = request.args.get('send_to_thingsboard', 'false').lower() == 'true'
         
         # Summary statistics
         stats_query = """
@@ -692,10 +981,18 @@ def get_summary():
         cursor.execute(recent_query)
         recent = cursor.fetchall()
         
+        # Send summary to ThingsBoard if requested
+        if send_to_tb:
+            threading.Thread(
+                target=send_summary_to_thingsboard,
+                daemon=True
+            ).start()
+        
         return jsonify({
             "statistics": stats,
             "recent_activity": recent,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "thingsboard_sent": send_to_tb
         })
         
     except Error as e:
@@ -706,15 +1003,130 @@ def get_summary():
             cursor.close()
             connection.close()
 
+@app.route('/mysql/sync', methods=['POST'])
+def sync_mysql_to_thingsboard():
+    """Endpoint untuk sinkronisasi manual data MySQL ke ThingsBoard"""
+    try:
+        data = request.get_json() or {}
+        sync_type = data.get('type', 'recent')  # 'recent', 'all', 'summary', 'specific'
+        limit = data.get('limit', 50)
+        analysis_id = data.get('analysis_id', None)
+        
+        sent_count = 0
+        
+        if sync_type == 'specific' and analysis_id:
+            # Sync specific analysis
+            success = send_mysql_analysis_to_thingsboard(analysis_id=analysis_id)
+            sent_count = 1 if success else 0
+            
+        elif sync_type == 'all':
+            # Sync all recent analyses
+            success = send_mysql_analysis_to_thingsboard(send_all=True, limit=limit)
+            sent_count = limit if success else 0
+            
+        elif sync_type == 'recent':
+            # Sync most recent analysis
+            success = send_mysql_analysis_to_thingsboard()
+            sent_count = 1 if success else 0
+            
+        elif sync_type == 'summary':
+            # Send summary data
+            success = send_summary_to_thingsboard()
+            sent_count = 1 if success else 0
+        
+        return jsonify({
+            "status": "success",
+            "message": f"MySQL sync completed: {sent_count} records sent to ThingsBoard",
+            "sync_type": sync_type,
+            "records_sent": sent_count,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in MySQL sync: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/mysql/analysis/<int:analysis_id>/image', methods=['GET'])
+def get_analysis_image(analysis_id):
+    """Endpoint untuk mendapatkan gambar analisis berdasarkan ID"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        query = """
+        SELECT image_filename, analysis_image 
+        FROM road_damage_analysis 
+        WHERE id = %s
+        """
+        
+        cursor.execute(query, (analysis_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            return jsonify({"error": "Analysis not found"}), 404
+        
+        return jsonify({
+            "analysis_id": analysis_id,
+            "image_filename": result['image_filename'],
+            "has_image": result['analysis_image'] is not None,
+            "image_base64": result['analysis_image'] if result['analysis_image'] else None
+        })
+        
+    except Error as e:
+        print(f"❌ Error fetching image: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.route('/thingsboard/test', methods=['GET'])
+def test_thingsboard():
+    """Endpoint untuk test koneksi ThingsBoard"""
+    test_payload = {
+        "test_message": "Flask MySQL integration test",
+        "test_timestamp": datetime.now().isoformat(),
+        "test_status": "active",
+        "test_value": 123.45,
+        "mysql_connection": "ok" if get_db_connection() else "failed"
+    }
+    
+    success = send_to_thingsboard(test_payload, "connection_test")
+    
+    return jsonify({
+        "thingsboard_connection": "success" if success else "failed",
+        "test_payload_with_prefix": {f"fls_{k}": v for k, v in test_payload.items()},
+        "thingsboard_url": THINGSBOARD_URL,
+        "timestamp": datetime.now().isoformat()
+    })
+
 if __name__ == '__main__':
     print("🚀 Road Monitoring Flask Server Starting...")
-    print("=" * 50)
+    print("=" * 60)
     print("📡 Available Endpoints:")
-    print("   - POST /multisensor  : Receive ESP32 sensor data")
-    print("   - GET  /status       : System status")
-    print("   - GET  /analysis     : Get analysis results")
-    print("   - GET  /summary      : Get damage summary")
-    print("=" * 50)
+    print("   - POST /multisensor              : Receive ESP32 sensor data")
+    print("   - GET  /status                   : System status")
+    print("   - GET  /analysis                 : Get analysis results")
+    print("   - GET  /summary                  : Get damage summary")
+    print("   - POST /mysql/sync               : Manual MySQL to ThingsBoard sync")
+    print("   - GET  /mysql/analysis/<id>/image: Get analysis image")
+    print("   - GET  /thingsboard/test         : Test ThingsBoard connection")
+    print("=" * 60)
+    print("🔗 ThingsBoard Integration:")
+    print(f"   - Server: {THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}")
+    print(f"   - URL: {THINGSBOARD_URL}")
+    print(f"   - Data Prefix: fls_ (Flask MySQL)")
+    print("=" * 60)
+    print("📊 MySQL Integration:")
+    print("   - Raw sensor data: Saved to MySQL only (ESP32 → ThingsBoard direct)")
+    print("   - Analysis results: MySQL → ThingsBoard with fls_ prefix")
+    print("   - Auto sync: Analysis results sent after saving")
+    print("   - Manual sync: Use /mysql/sync endpoint")
+    print("   - Data source: road_damage_analysis table")
+    print("=" * 60)
     
     # Test database connection
     test_conn = get_db_connection()
@@ -725,12 +1137,24 @@ if __name__ == '__main__':
         print("❌ Database connection failed - check configuration")
         exit(1)
     
+    # Test ThingsBoard connection
+    test_payload = {
+        "startup_test": "Flask server with MySQL integration starting",
+        "startup_timestamp": datetime.now().isoformat(),
+        "mysql_integration": "enabled"
+    }
+    
+    if send_to_thingsboard(test_payload, "startup_test"):
+        print("✅ ThingsBoard connection successful")
+    else:
+        print("⚠️ ThingsBoard connection failed - check configuration")
+    
     # Start server
     flask_host = os.getenv('FLASK_HOST', '0.0.0.0')
     flask_port = int(os.getenv('FLASK_PORT', 5000))
     flask_debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     
     print(f"🌐 Server running on http://{flask_host}:{flask_port}")
-    print("=" * 50)
+    print("=" * 60)
     
     app.run(host=flask_host, port=flask_port, debug=flask_debug)
