@@ -12,8 +12,8 @@ SURFACE_CHANGE_THRESHOLDS = {
 # GY-521 Accelerometer Thresholds (untuk deteksi guncangan)
 VIBRATION_THRESHOLDS = {
     'light': 2000,      # Guncangan ringan
-    'moderate': 5000,   # Guncangan sedang
-    'heavy': 10000      # Guncangan berat
+    'moderate': 3000,   # Guncangan sedang 5k
+    'heavy': 4000      # Guncangan berat 10k
 }
 
 # GY-521 Gyroscope Thresholds (untuk deteksi rotasi)
