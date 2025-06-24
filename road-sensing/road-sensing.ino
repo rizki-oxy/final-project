@@ -5,14 +5,14 @@
 #include <PubSubClient.h>
 
 // WiFi & MQTT Configuration
-const char* ssid = "MOMO";
-const char* password = "1sampai8";
-const char* mqtt_server = "d192.168.18.38";
+const char* ssid = "fff";
+const char* password = "halo1234000";
+const char* mqtt_server = "192.168.43.18";
 const int mqtt_port = 1883;
 const char* access_token = "0939gxC3IXo3uoCIgAED";
 
 // ThingsBoard HTTP Configuration
-const char* thingsboard_server = "192.168.18.38";  // ThingsBoard demo server
+const char* thingsboard_server = "192.168.43.18";  // ThingsBoard demo server
 const int thingsboard_port = 8081;  // Default ThingsBoard port
 const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
 
@@ -544,7 +544,7 @@ void sendToFlaskServer(String payload) {
   flaskPayload += "}";
   
   HTTPClient http;
-  http.begin("http://192.168.18.38:5000/multisensor");
+  http.begin("http://192.168.43.18:5000/multisensor");
   http.addHeader("Content-Type", "application/json");
   int httpResponseCode = http.POST(flaskPayload);
   Serial.print("📡 Flask response: ");

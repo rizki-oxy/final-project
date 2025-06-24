@@ -33,7 +33,7 @@ DB_CONFIG = {
 
 # ThingsBoard Configuration
 THINGSBOARD_CONFIG = {
-    'server': os.getenv('THINGSBOARD_SERVER', '192.168.18.38'),
+    'server': os.getenv('THINGSBOARD_SERVER', '192.168.43.18'),
     'port': os.getenv('THINGSBOARD_PORT', '8081'),
     'access_token': os.getenv('THINGSBOARD_ACCESS_TOKEN', '0939gxC3IXo3uoCIgAED')
 }
