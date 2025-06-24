@@ -14,7 +14,12 @@ import mysql.connector
 from mysql.connector import Error
 import base64
 from dotenv import load_dotenv
-from thresholds import *
+from thresholds import (
+    MIN_DATA_POINTS, ANALYSIS_INTERVAL, EARTH_RADIUS, MAX_GPS_GAP,
+    SURFACE_CHANGE_THRESHOLDS, VIBRATION_THRESHOLDS, ROTATION_THRESHOLDS,
+    get_surface_change_severity, get_vibration_severity, get_rotation_severity,
+    classify_damage_or_logic
+)
 
 # Load environment variables
 load_dotenv()
@@ -122,128 +127,8 @@ def send_to_thingsboard(payload_data, data_type="analysis"):
         print(f"❌ ThingsBoard error: {e}")
         return False
 
-def send_mysql_analysis_to_thingsboard(analysis_id=None, send_all=False, limit=50):
-    """Mengirim data analisis dari MySQL ke ThingsBoard dengan prefix fls_"""
-    connection = get_db_connection()
-    if not connection:
-        print("❌ Database connection failed for ThingsBoard sync")
-        return False
-    
-    try:
-        cursor = connection.cursor(dictionary=True)
-        sent_count = 0
-        
-        if send_all:
-            # Kirim beberapa data terbaru
-            query = """
-            SELECT * FROM road_damage_analysis 
-            ORDER BY analysis_timestamp DESC 
-            LIMIT %s
-            """
-            cursor.execute(query, (limit,))
-            analyses = cursor.fetchall()
-            
-            print(f"🔄 Sending {len(analyses)} analysis records to ThingsBoard...")
-            
-        elif analysis_id:
-            # Kirim data spesifik berdasarkan ID
-            query = """
-            SELECT * FROM road_damage_analysis 
-            WHERE id = %s
-            """
-            cursor.execute(query, (analysis_id,))
-            analyses = cursor.fetchall()
-            
-        else:
-            # Kirim data terbaru saja
-            query = """
-            SELECT * FROM road_damage_analysis 
-            ORDER BY analysis_timestamp DESC 
-            LIMIT 1
-            """
-            cursor.execute(query)
-            analyses = cursor.fetchall()
-        
-        for analysis in analyses:
-            try:
-                # Parse anomalies JSON
-                anomalies_data = []
-                if analysis.get('anomalies'):
-                    try:
-                        anomalies_data = json.loads(analysis['anomalies'])
-                    except json.JSONDecodeError:
-                        anomalies_data = []
-                
-                # Create payload for ThingsBoard
-                thingsboard_payload = {
-                    "analysis_id": analysis['id'],
-                    "analysis_timestamp": analysis['analysis_timestamp'].isoformat() if analysis['analysis_timestamp'] else None,
-                    "start_latitude": float(analysis['start_latitude']) if analysis['start_latitude'] else None,
-                    "start_longitude": float(analysis['start_longitude']) if analysis['start_longitude'] else None,
-                    "end_latitude": float(analysis['end_latitude']) if analysis['end_latitude'] else None,
-                    "end_longitude": float(analysis['end_longitude']) if analysis['end_longitude'] else None,
-                    "damage_classification": analysis['damage_classification'],
-                    "damage_length": float(analysis['damage_length']) if analysis['damage_length'] else 0,
-                    "surface_change_max": float(analysis['surface_change_max']) if analysis['surface_change_max'] else 0,
-                    "surface_change_avg": float(analysis['surface_change_avg']) if analysis['surface_change_avg'] else 0,
-                    "surface_change_count": int(analysis['surface_change_count']) if analysis['surface_change_count'] else 0,
-                    "vibration_max": float(analysis['vibration_max']) if analysis['vibration_max'] else 0,
-                    "vibration_avg": float(analysis['vibration_avg']) if analysis['vibration_avg'] else 0,
-                    "vibration_count": int(analysis['vibration_count']) if analysis['vibration_count'] else 0,
-                    "data_points_count": int(analysis['data_points_count']) if analysis['data_points_count'] else 0,
-                    "analysis_duration": float(analysis['analysis_duration']) if analysis['analysis_duration'] else 0,
-                    "image_filename": analysis['image_filename'] if analysis['image_filename'] else None,
-                    "anomalies_count": len(anomalies_data),
-                }
-                
-                # Add anomaly details (up to 5 anomalies)
-                for i, anomaly in enumerate(anomalies_data[:5]):
-                    thingsboard_payload[f"anomaly_{i+1}_type"] = anomaly.get('type', 'unknown')
-                    thingsboard_payload[f"anomaly_{i+1}_severity"] = anomaly.get('severity', 'unknown')
-                
-                # Add image data as base64 if exists (optional - for small images only)
-                if analysis.get('analysis_image') and len(str(analysis['analysis_image'])) < 100000:  # Max 100KB
-                    thingsboard_payload["analysis_image_base64"] = analysis['analysis_image']
-                
-                # Calculate damage score for visualization
-                if analysis['surface_change_max'] and analysis['vibration_max']:
-                    damage_score = min(
-                        (float(analysis['surface_change_max']) / 10.0 * 0.4) +
-                        (float(analysis['vibration_max']) / 5000.0 * 0.3) +
-                        (len(anomalies_data) / 10.0 * 0.3), 1.0
-                    )
-                    thingsboard_payload["damage_score"] = round(damage_score, 3)
-                
-                # Remove None values
-                clean_payload = {k: v for k, v in thingsboard_payload.items() if v is not None}
-                
-                # Send to ThingsBoard
-                if send_to_thingsboard(clean_payload, "mysql_analysis"):
-                    sent_count += 1
-                    print(f"✅ Analysis ID {analysis['id']} sent to ThingsBoard")
-                else:
-                    print(f"❌ Failed to send Analysis ID {analysis['id']} to ThingsBoard")
-                
-                # Small delay to prevent overwhelming ThingsBoard
-                time.sleep(0.1)
-                
-            except Exception as e:
-                print(f"❌ Error processing analysis ID {analysis['id']}: {e}")
-                continue
-        
-        print(f"📊 MySQL to ThingsBoard sync completed: {sent_count}/{len(analyses)} records sent")
-        return sent_count > 0
-        
-    except Error as e:
-        print(f"❌ Error fetching analysis data: {e}")
-        return False
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
 def save_sensor_data(data):
-    """Menyimpan data sensor mentah ke database (TIDAK KIRIM KE THINGSBOARD)"""
+    """Menyimpan data sensor mentah ke database"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -288,9 +173,6 @@ def save_sensor_data(data):
         connection.commit()
         
         print(f"✅ Raw sensor data saved to MySQL (ID: {cursor.lastrowid})")
-        # NOTE: Raw sensor data TIDAK dikirim ke ThingsBoard dari Flask
-        # karena ESP32 sudah mengirim data raw langsung ke ThingsBoard
-        
         return True
         
     except Error as e:
@@ -320,7 +202,6 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 def analyze_surface_changes(data_points):
     """Analisis perubahan permukaan jalan dari data ultrasonic"""
     changes = []
-    change_counts = 0
     
     for i in range(1, len(data_points)):
         prev_data = data_points[i-1]
@@ -335,19 +216,17 @@ def analyze_surface_changes(data_points):
                 change = abs(curr_val - prev_val)
                 if change >= SURFACE_CHANGE_THRESHOLDS['minor']:
                     changes.append(change)
-                    change_counts += 1
     
     return {
         'changes': changes,
         'max_change': max(changes) if changes else 0,
         'avg_change': sum(changes) / len(changes) if changes else 0,
-        'count': change_counts
+        'count': len(changes)
     }
 
 def analyze_vibrations(data_points):
     """Analisis guncangan dari data accelerometer"""
     vibrations = []
-    vibration_counts = 0
     
     for i in range(1, len(data_points)):
         prev_data = data_points[i-1]
@@ -364,13 +243,12 @@ def analyze_vibrations(data_points):
                 vibration = abs(curr_mag - prev_mag)
                 if vibration >= VIBRATION_THRESHOLDS['light']:
                     vibrations.append(vibration)
-                    vibration_counts += 1
     
     return {
         'vibrations': vibrations,
         'max_vibration': max(vibrations) if vibrations else 0,
         'avg_vibration': sum(vibrations) / len(vibrations) if vibrations else 0,
-        'count': vibration_counts
+        'count': len(vibrations)
     }
 
 def analyze_rotations(data_points):
@@ -395,8 +273,11 @@ def analyze_rotations(data_points):
         'count': len(rotations)
     }
 
-def calculate_damage_length(data_points):
-    """Menghitung panjang kerusakan berdasarkan data GPS"""
+def calculate_damage_length(data_points, has_damage=False):
+    """Menghitung panjang kerusakan berdasarkan data GPS - hanya jika ada kerusakan"""
+    if not has_damage:
+        return 0
+    
     gps_points = []
     
     for data in data_points:
@@ -453,13 +334,18 @@ def detect_anomalies(data_points):
     return anomalies
 
 def create_analysis_visualization(analysis_data):
-    """Membuat visualisasi analisis untuk disimpan"""
+    """Membuat visualisasi analisis untuk disimpan - hanya jika ada kerusakan"""
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # 1. Data perubahan permukaan (Time Series Line Chart)
+    # Buat time axis dalam detik (0-30 detik)
+    analysis_duration = 30  # Selalu 30 detik untuk analisis
+    
+    # 1. Data perubahan permukaan
     if analysis_data['surface_analysis']['changes']:
-        # Create time index for changes
-        time_points = list(range(len(analysis_data['surface_analysis']['changes'])))
+        # Distribusikan data secara merata dalam 30 detik
+        num_changes = len(analysis_data['surface_analysis']['changes'])
+        time_points = [i * (analysis_duration / (num_changes - 1)) if num_changes > 1 else 0 
+                      for i in range(num_changes)]
         
         ax1.plot(time_points, analysis_data['surface_analysis']['changes'], 
                 marker='o', linewidth=2, markersize=4, color='orange', alpha=0.8)
@@ -472,19 +358,26 @@ def create_analysis_visualization(analysis_data):
         
         ax1.fill_between(time_points, analysis_data['surface_analysis']['changes'], 
                         alpha=0.3, color='orange')
-        ax1.set_title('Perubahan Permukaan Jalan (Time Series)')
-        ax1.set_xlabel('Urutan Deteksi')
+        ax1.set_title('Perubahan Permukaan Jalan')
+        ax1.set_xlabel('Waktu (detik)')
         ax1.set_ylabel('Perubahan (cm)')
+        ax1.set_xlim(0, 30)
         ax1.legend()
         ax1.grid(True, alpha=0.3)
     else:
         ax1.text(0.5, 0.5, 'Tidak ada perubahan\npermukaan signifikan', 
                 ha='center', va='center', transform=ax1.transAxes, fontsize=14)
-        ax1.set_title('Perubahan Permukaan Jalan (Time Series)')
+        ax1.set_title('Perubahan Permukaan Jalan')
+        ax1.set_xlabel('Waktu (detik)')
+        ax1.set_xlim(0, 30)
+        ax1.grid(True, alpha=0.3)
     
-    # 2. Data guncangan (Time Series Line Chart)
+    # 2. Data guncangan
     if analysis_data['vibration_analysis']['vibrations']:
-        time_points = list(range(len(analysis_data['vibration_analysis']['vibrations'])))
+        # Distribusikan data secara merata dalam 30 detik
+        num_vibrations = len(analysis_data['vibration_analysis']['vibrations'])
+        time_points = [i * (analysis_duration / (num_vibrations - 1)) if num_vibrations > 1 else 0 
+                      for i in range(num_vibrations)]
         
         ax2.plot(time_points, analysis_data['vibration_analysis']['vibrations'], 
                 marker='s', linewidth=2, markersize=4, color='red', alpha=0.8)
@@ -497,17 +390,21 @@ def create_analysis_visualization(analysis_data):
         
         ax2.fill_between(time_points, analysis_data['vibration_analysis']['vibrations'], 
                         alpha=0.3, color='red')
-        ax2.set_title('Intensitas Guncangan (Time Series)')
-        ax2.set_xlabel('Urutan Deteksi')
-        ax2.set_ylabel('Intensitas Guncangan')
+        ax2.set_title('Intensitas Guncangan')
+        ax2.set_xlabel('Waktu (detik)')
+        ax2.set_ylabel('Guncangan')
+        ax2.set_xlim(0, 30)
         ax2.legend()
         ax2.grid(True, alpha=0.3)
     else:
         ax2.text(0.5, 0.5, 'Tidak ada guncangan\nsignifikan', 
                 ha='center', va='center', transform=ax2.transAxes, fontsize=14)
-        ax2.set_title('Intensitas Guncangan (Time Series)')
+        ax2.set_title('Intensitas Guncangan')
+        ax2.set_xlabel('Waktu (detik)')
+        ax2.set_xlim(0, 30)
+        ax2.grid(True, alpha=0.3)
     
-    # 3. Panjang kerusakan dan lokasi
+    # 3. Info lokasi dan panjang kerusakan
     info_text = f"📏 Panjang Kerusakan: {analysis_data['damage_length']:.1f} meter\n\n"
     info_text += f"🏁 Lokasi Awal:\n"
     if analysis_data['start_location']:
@@ -519,22 +416,18 @@ def create_analysis_visualization(analysis_data):
     info_text += f"🏁 Lokasi Akhir:\n"
     if analysis_data['end_location']:
         info_text += f"   Lat: {analysis_data['end_location'][0]:.6f}\n"
-        info_text += f"   Lng: {analysis_data['end_location'][1]:.6f}\n\n"
+        info_text += f"   Lng: {analysis_data['end_location'][1]:.6f}"
     else:
-        info_text += f"   GPS tidak tersedia\n\n"
-    
-    info_text += f"⏱️ Durasi Analisis: {analysis_data['duration']:.1f} detik\n"
-    info_text += f"📊 Jumlah Data: {analysis_data['data_count']} titik"
+        info_text += f"   GPS tidak tersedia"
     
     ax3.text(0.05, 0.95, info_text, ha='left', va='top', transform=ax3.transAxes, 
             fontsize=11, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.7))
-    ax3.set_title('Data Panjang Kerusakan Jalan')
+    ax3.set_title('Info Kerusakan Jalan')
     ax3.axis('off')
     
-    # 4. Klasifikasi dan anomali dengan trend visualization
+    # 4. Klasifikasi dan anomali
     classification_text = f"🏗️ KLASIFIKASI KERUSAKAN:\n"
     classification_text += f"   {analysis_data['damage_classification'].upper().replace('_', ' ')}\n\n"
-    classification_text += f"🎯 SKOR KERUSAKAN: {analysis_data['damage_score']:.2f}\n\n"
     
     classification_text += f"⚠️ ANOMALI TERDETEKSI:\n"
     for anomaly in analysis_data['anomalies']:
@@ -553,30 +446,37 @@ def create_analysis_visualization(analysis_data):
     
     ax4.text(0.05, 0.95, classification_text, ha='left', va='top', transform=ax4.transAxes, 
             fontsize=11, bbox=dict(boxstyle="round,pad=0.5", facecolor=bg_color, alpha=0.8))
-    ax4.set_title('Klasifikasi Kerusakan Jalan')
+    ax4.set_title('Klasifikasi Kerusakan')
     ax4.axis('off')
     
     plt.tight_layout()
     
     # Save dengan timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'road_analysis_{timestamp}.png'
+    filename = f'road_damage_{timestamp}.png'
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     plt.savefig(filepath, dpi=100, bbox_inches='tight')
     plt.close()
     
     return filepath, filename
 
-def save_analysis_to_database(analysis_data, image_path, image_filename):
-    """Menyimpan hasil analisis ke database dan kirim ke ThingsBoard"""
+def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
+    """Menyimpan hasil analisis ke database - HANYA JIKA ADA KERUSAKAN"""
+    
+    # Cek apakah ada kerusakan
+    if not analysis_data.get('has_damage', False):
+        print("💡 Jalan dalam kondisi baik - Tidak ada data yang disimpan ke MySQL")
+        return True
+    
     connection = get_db_connection()
     if not connection:
+        print("❌ Database connection failed")
         return False
     
     try:
         cursor = connection.cursor()
         
-        # Encode image to base64
+        # Encode image to base64 hanya jika ada gambar
         image_data = None
         if image_path and os.path.exists(image_path):
             with open(image_path, 'rb') as img_file:
@@ -587,9 +487,9 @@ def save_analysis_to_database(analysis_data, image_path, image_filename):
             analysis_timestamp, start_latitude, start_longitude, end_latitude, end_longitude,
             damage_classification, damage_length, surface_change_max, surface_change_avg, surface_change_count,
             vibration_max, vibration_avg, vibration_count, anomalies,
-            analysis_image, image_filename, data_points_count, analysis_duration
+            analysis_image, image_filename
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """
         
@@ -599,34 +499,30 @@ def save_analysis_to_database(analysis_data, image_path, image_filename):
         end_lng = analysis_data['end_location'][1] if analysis_data['end_location'] else None
         
         insert_data = (
-            datetime.now(),  # analysis_timestamp
-            start_lat, start_lng, end_lat, end_lng,  # locations
-            analysis_data['damage_classification'],  # damage_classification
-            analysis_data['damage_length'],  # damage_length
-            analysis_data['surface_analysis']['max_change'],  # surface_change_max
-            analysis_data['surface_analysis']['avg_change'],  # surface_change_avg
-            analysis_data['surface_analysis']['count'],  # surface_change_count
-            analysis_data['vibration_analysis']['max_vibration'],  # vibration_max
-            analysis_data['vibration_analysis']['avg_vibration'],  # vibration_avg
-            analysis_data['vibration_analysis']['count'],  # vibration_count
-            json.dumps(analysis_data['anomalies']),  # anomalies (JSON)
-            image_data,  # analysis_image
-            image_filename,  # image_filename
-            analysis_data['data_count'],  # data_points_count
-            analysis_data['duration']  # analysis_duration
+            datetime.now(),
+            start_lat, start_lng, end_lat, end_lng,
+            analysis_data['damage_classification'],
+            analysis_data['damage_length'],
+            analysis_data['surface_analysis']['max_change'],
+            analysis_data['surface_analysis']['avg_change'],
+            analysis_data['surface_analysis']['count'],
+            analysis_data['vibration_analysis']['max_vibration'],
+            analysis_data['vibration_analysis']['avg_vibration'],
+            analysis_data['vibration_analysis']['count'],
+            json.dumps(analysis_data['anomalies']),
+            image_data,
+            image_filename
         )
         
         cursor.execute(insert_query, insert_data)
         connection.commit()
         
-        # Get the inserted analysis ID
         analysis_id = cursor.lastrowid
+        print(f"✅ Kerusakan berhasil disimpan ke MySQL: {analysis_data['damage_classification']} (ID: {analysis_id})")
         
-        print(f"✅ Analisis berhasil disimpan: {analysis_data['damage_classification']}")
-        
-        # Send MySQL analysis data to ThingsBoard in background thread
+        # Send to ThingsBoard dengan gambar dalam thread terpisah
         threading.Thread(
-            target=send_mysql_analysis_to_thingsboard, 
+            target=send_analysis_with_image_to_thingsboard, 
             args=(analysis_id,),
             daemon=True
         ).start()
@@ -641,8 +537,179 @@ def save_analysis_to_database(analysis_data, image_path, image_filename):
             cursor.close()
             connection.close()
 
+def send_analysis_to_thingsboard(analysis_data, analysis_id):
+    """Kirim hasil analisis ke ThingsBoard - HANYA JIKA ADA KERUSAKAN"""
+    
+    # Double check - pastikan ada kerusakan
+    if not analysis_data.get('has_damage', False):
+        print("💡 Jalan dalam kondisi baik - Tidak ada data yang dikirim ke ThingsBoard")
+        return
+    
+    try:
+        # Buat payload untuk ThingsBoard dengan data kerusakan
+        thingsboard_payload = {
+            "analysis_id": analysis_id,
+            "analysis_timestamp": datetime.now().isoformat(),
+            "damage_classification": analysis_data['damage_classification'],
+            "damage_length": analysis_data['damage_length'],
+            "surface_change_max": analysis_data['surface_analysis']['max_change'],
+            "surface_change_avg": analysis_data['surface_analysis']['avg_change'],
+            "surface_change_count": analysis_data['surface_analysis']['count'],
+            "vibration_max": analysis_data['vibration_analysis']['max_vibration'],
+            "vibration_avg": analysis_data['vibration_analysis']['avg_vibration'],
+            "vibration_count": analysis_data['vibration_analysis']['count'],
+            "anomalies_count": len(analysis_data['anomalies']),
+            "damage_detected": True  # Flag untuk menandai ada kerusakan
+        }
+        
+        # Add location if available
+        if analysis_data['start_location']:
+            thingsboard_payload["start_latitude"] = analysis_data['start_location'][0]
+            thingsboard_payload["start_longitude"] = analysis_data['start_location'][1]
+            
+        if analysis_data['end_location']:
+            thingsboard_payload["end_latitude"] = analysis_data['end_location'][0]
+            thingsboard_payload["end_longitude"] = analysis_data['end_location'][1]
+        
+        # Add severity level untuk dashboard
+        severity_map = {
+            'rusak_ringan': 1,
+            'rusak_sedang': 2,
+            'rusak_berat': 3
+        }
+        thingsboard_payload["damage_severity"] = severity_map.get(analysis_data['damage_classification'], 0)
+        
+        # Send to ThingsBoard
+        if send_to_thingsboard(thingsboard_payload, "road_damage_detected"):
+            print(f"✅ Data kerusakan terkirim ke ThingsBoard: {analysis_data['damage_classification']}")
+        else:
+            print(f"❌ Gagal mengirim data kerusakan ke ThingsBoard")
+        
+    except Exception as e:
+        print(f"❌ Error sending damage data to ThingsBoard: {e}")
+
+def send_analysis_with_image_to_thingsboard(analysis_id):
+    """Kirim data analisis beserta gambar ke ThingsBoard dengan validasi image"""
+    connection = get_db_connection()
+    if not connection:
+        return False
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        query = """
+        SELECT * FROM road_damage_analysis 
+        WHERE id = %s
+        """
+        
+        cursor.execute(query, (analysis_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            print(f"❌ Analysis ID {analysis_id} not found")
+            return False
+        
+        print(f"🔍 Processing analysis ID {analysis_id}")
+        print(f"📊 Has image: {result['analysis_image'] is not None}")
+        if result['analysis_image']:
+            print(f"📸 Image data length: {len(result['analysis_image'])} characters")
+            # Cek format image
+            if result['analysis_image'].startswith('iVBORw0KGgo'):
+                print(f"✅ Image format: PNG (valid)")
+            else:
+                print(f"⚠️ Image format: Unknown or corrupt")
+                print(f"🔍 Image starts with: {result['analysis_image'][:50]}...")
+        
+        # Buat payload lengkap dengan image
+        thingsboard_payload = {
+            "analysis_id": result['id'],
+            "analysis_timestamp": result['analysis_timestamp'].isoformat() if result['analysis_timestamp'] else None,
+            "damage_classification": result['damage_classification'],
+            "damage_length": float(result['damage_length']) if result['damage_length'] else 0,
+            "surface_change_max": float(result['surface_change_max']) if result['surface_change_max'] else 0,
+            "surface_change_avg": float(result['surface_change_avg']) if result['surface_change_avg'] else 0,
+            "surface_change_count": int(result['surface_change_count']) if result['surface_change_count'] else 0,
+            "vibration_max": float(result['vibration_max']) if result['vibration_max'] else 0,
+            "vibration_avg": float(result['vibration_avg']) if result['vibration_avg'] else 0,
+            "vibration_count": int(result['vibration_count']) if result['vibration_count'] else 0,
+            "damage_detected": True
+        }
+        
+        # Add location if available
+        if result['start_latitude'] and result['start_longitude']:
+            thingsboard_payload["start_latitude"] = float(result['start_latitude'])
+            thingsboard_payload["start_longitude"] = float(result['start_longitude'])
+            
+        if result['end_latitude'] and result['end_longitude']:
+            thingsboard_payload["end_latitude"] = float(result['end_latitude'])
+            thingsboard_payload["end_longitude"] = float(result['end_longitude'])
+        
+        # VALIDASI DAN ADD IMAGE BASE64
+        if result['analysis_image']:
+            image_data = result['analysis_image']
+            
+            # Validasi format base64
+            try:
+                import base64
+                # Test decode untuk memastikan valid
+                test_decode = base64.b64decode(image_data[:100])  # Test first 100 chars
+                print(f"✅ Base64 validation: PASSED")
+                
+                # Cek ukuran data untuk ThingsBoard limit
+                if len(image_data) > 200000:  # 200KB limit
+                    print(f"⚠️ Image data sangat besar ({len(image_data)} chars), akan dipotong")
+                    # Ambil sebagian data atau compress
+                    thingsboard_payload["analysis_image_base64"] = image_data[:100000] + "...truncated"
+                    thingsboard_payload["has_image"] = True
+                    thingsboard_payload["image_truncated"] = True
+                    thingsboard_payload["image_full_size"] = len(image_data)
+                    print(f"📤 Sending truncated image data ({len(thingsboard_payload['analysis_image_base64'])} chars)")
+                else:
+                    thingsboard_payload["analysis_image_base64"] = image_data
+                    thingsboard_payload["has_image"] = True
+                    thingsboard_payload["image_truncated"] = False
+                    print(f"📤 Sending full image data ({len(image_data)} chars)")
+                    
+            except Exception as e:
+                print(f"❌ Base64 validation failed: {e}")
+                thingsboard_payload["has_image"] = False
+                thingsboard_payload["image_error"] = str(e)
+        else:
+            thingsboard_payload["has_image"] = False
+            print("📤 No image data to send")
+        
+        # Add anomalies count
+        if result['anomalies']:
+            try:
+                anomalies_data = json.loads(result['anomalies'])
+                thingsboard_payload["anomalies_count"] = len(anomalies_data)
+            except json.JSONDecodeError:
+                thingsboard_payload["anomalies_count"] = 0
+        
+        # Debug: Print payload info (without image data to avoid spam)
+        debug_payload = {k: v for k, v in thingsboard_payload.items() if k not in ['analysis_image_base64']}
+        print(f"📋 Payload keys: {list(debug_payload.keys())}")
+        print(f"📋 Has image: {thingsboard_payload.get('has_image', False)}")
+        print(f"📋 Image truncated: {thingsboard_payload.get('image_truncated', False)}")
+        
+        # Send to ThingsBoard
+        if send_to_thingsboard(thingsboard_payload, "road_damage_with_image"):
+            print(f"✅ Data lengkap dengan gambar terkirim ke ThingsBoard (ID: {analysis_id})")
+            return True
+        else:
+            print(f"❌ Gagal mengirim data lengkap ke ThingsBoard (ID: {analysis_id})")
+            return False
+            
+    except Error as e:
+        print(f"❌ Error sending complete data to ThingsBoard: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
 def perform_30s_analysis():
-    """Melakukan analisis komprehensif setiap 30 detik"""
+    """Melakukan analisis komprehensif setiap 30 detik dengan logika OR sederhana"""
     global last_analysis_time
     
     current_time = time.time()
@@ -660,7 +727,6 @@ def perform_30s_analysis():
     surface_analysis = analyze_surface_changes(data_points)
     vibration_analysis = analyze_vibrations(data_points)
     rotation_analysis = analyze_rotations(data_points)
-    damage_length = calculate_damage_length(data_points)
     anomalies = detect_anomalies(data_points)
     
     # Tentukan lokasi awal dan akhir
@@ -673,127 +739,69 @@ def perform_30s_analysis():
                 start_location = (data['latitude'], data['longitude'])
             end_location = (data['latitude'], data['longitude'])
     
-    # Hitung skor dan klasifikasi kerusakan
-    surface_changes = surface_analysis['changes']
-    vibrations = vibration_analysis['vibrations']
-    rotations = rotation_analysis['rotations']
-    frequency_factor = len(anomalies) / len(data_points) if data_points else 0
+    # === KLASIFIKASI SEDERHANA DENGAN LOGIKA OR ===
+    max_surface_change = surface_analysis['max_change']
+    max_vibration = vibration_analysis['max_vibration'] 
+    max_rotation = rotation_analysis['max_rotation']
     
-    damage_score = calculate_damage_score(surface_changes, vibrations, rotations, frequency_factor)
-    damage_classification = classify_damage(damage_score)
+    # Gunakan fungsi klasifikasi dari thresholds.py dengan logika OR
+    damage_classification = classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
     
-    # Compile analysis data
-    analysis_data = {
-        'surface_analysis': surface_analysis,
-        'vibration_analysis': vibration_analysis,
-        'rotation_analysis': rotation_analysis,
-        'damage_length': damage_length,
-        'anomalies': anomalies,
-        'damage_score': damage_score,
-        'damage_classification': damage_classification,
-        'start_location': start_location,
-        'end_location': end_location,
-        'data_count': len(data_points),
-        'duration': time.time() - start_time
-    }
+    # Hanya hitung panjang kerusakan jika ada kerusakan
+    has_damage = damage_classification != 'baik'
+    damage_length = calculate_damage_length(data_points, has_damage)
     
-    # Buat dan simpan visualisasi
-    try:
-        image_path, image_filename = create_analysis_visualization(analysis_data)
-        
-        # Simpan ke database dan kirim ke ThingsBoard
-        save_analysis_to_database(analysis_data, image_path, image_filename)
-        
-        print(f"✅ Analisis selesai - Klasifikasi: {damage_classification}")
-        print(f"📊 Skor kerusakan: {damage_score:.2f}")
-        print(f"📏 Panjang kerusakan: {damage_length:.1f}m")
-        print(f"⚠️ Anomali: {len(anomalies)}")
-        
-    except Exception as e:
-        print(f"❌ Error dalam analisis: {e}")
+    print(f"📊 Parameter Klasifikasi:")
+    print(f"   - Perubahan Permukaan Max: {max_surface_change:.2f} cm")
+    print(f"   - Getaran Max: {max_vibration:.0f}")
+    print(f"   - Rotasi Max: {max_rotation:.0f} deg/s")
+    print(f"   - Hasil Klasifikasi: {damage_classification.upper().replace('_', ' ')}")
+    print(f"   - Panjang Kerusakan: {damage_length:.1f}m")
     
-    last_analysis_time = current_time
-
-def send_summary_to_thingsboard():
-    """Mengirim ringkasan data ke ThingsBoard"""
-    connection = get_db_connection()
-    if not connection:
-        return False
-    
-    try:
-        cursor = connection.cursor(dictionary=True)
+    # HANYA PROSES LEBIH LANJUT JIKA ADA KERUSAKAN
+    if has_damage:
+        print(f"⚠️  KERUSAKAN TERDETEKSI - Memproses dan menyimpan data...")
         
-        # Get recent statistics
-        stats_query = """
-        SELECT 
-            damage_classification,
-            COUNT(*) as count,
-            AVG(damage_length) as avg_length,
-            SUM(damage_length) as total_length,
-            MAX(surface_change_max) as max_surface_change,
-            MAX(vibration_max) as max_vibration,
-            AVG(surface_change_avg) as avg_surface_change,
-            AVG(vibration_avg) as avg_vibration
-        FROM road_damage_analysis 
-        WHERE analysis_timestamp >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
-        GROUP BY damage_classification
-        """
-        
-        cursor.execute(stats_query)
-        hourly_stats = cursor.fetchall()
-        
-        # Get total counts
-        total_query = """
-        SELECT 
-            COUNT(*) as total_analyses,
-            AVG(damage_length) as avg_total_length,
-            SUM(damage_length) as cumulative_length,
-            COUNT(DISTINCT DATE(analysis_timestamp)) as days_monitored,
-            MAX(analysis_timestamp) as last_analysis
-        FROM road_damage_analysis
-        """
-        
-        cursor.execute(total_query)
-        total_stats = cursor.fetchone()
-        
-        # Prepare summary payload
-        summary_payload = {
-            "total_analyses": int(total_stats['total_analyses'] or 0),
-            "avg_total_length": round(float(total_stats['avg_total_length'] or 0), 2),
-            "cumulative_damage_length": round(float(total_stats['cumulative_length'] or 0), 2),
-            "days_monitored": int(total_stats['days_monitored'] or 0),
-            "last_analysis": total_stats['last_analysis'].isoformat() if total_stats['last_analysis'] else None,
-            "rusak_ringan_count": 0,
-            "rusak_sedang_count": 0,
-            "rusak_berat_count": 0,
-            "rusak_ringan_avg_length": 0,
-            "rusak_sedang_avg_length": 0,
-            "rusak_berat_avg_length": 0
+        # Compile analysis data
+        analysis_data = {
+            'surface_analysis': surface_analysis,
+            'vibration_analysis': vibration_analysis,
+            'rotation_analysis': rotation_analysis,
+            'damage_length': damage_length,
+            'anomalies': anomalies,
+            'damage_classification': damage_classification,
+            'start_location': start_location,
+            'end_location': end_location,
+            'has_damage': has_damage
         }
         
-        # Add classification-specific data
-        for stat in hourly_stats:
-            classification = stat['damage_classification']
-            summary_payload[f"{classification}_count"] = int(stat['count'])
-            summary_payload[f"{classification}_avg_length"] = round(float(stat['avg_length'] or 0), 2)
-            summary_payload[f"{classification}_total_length"] = round(float(stat['total_length'] or 0), 2)
-            summary_payload[f"{classification}_max_surface_change"] = round(float(stat['max_surface_change'] or 0), 2)
-            summary_payload[f"{classification}_max_vibration"] = round(float(stat['max_vibration'] or 0), 2)
-            summary_payload[f"{classification}_avg_surface_change"] = round(float(stat['avg_surface_change'] or 0), 2)
-            summary_payload[f"{classification}_avg_vibration"] = round(float(stat['avg_vibration'] or 0), 2)
+        # Buat dan simpan visualisasi
+        image_path = None
+        image_filename = None
         
-        # Send to ThingsBoard
-        send_to_thingsboard(summary_payload, "mysql_summary")
+        try:
+            image_path, image_filename = create_analysis_visualization(analysis_data)
+            print(f"📸 Gambaranalisis dibuat: {image_filename}")
+        except Exception as e:
+            print(f"❌ Error membuat visualisasi: {e}")
         
-        return True
-        
-    except Error as e:
-        print(f"❌ Error getting summary data: {e}")
-        return False
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+        # Simpan ke database dan kirim ke ThingsBoard
+        try:
+            save_analysis_to_database(analysis_data, image_path, image_filename)
+            
+            print(f"✅ Analisis kerusakan tersimpan - Klasifikasi: {damage_classification}")
+            print(f"📏 Panjang kerusakan: {damage_length:.1f}m")
+            print(f"⚠️ Anomali: {len(anomalies)}")
+            print(f"💾 Data dikirim ke MySQL dan ThingsBoard")
+            
+        except Exception as e:
+            print(f"❌ Error menyimpan analisis: {e}")
+    
+    else:
+        print(f"✅ JALAN DALAM KONDISI BAIK - Tidak ada data yang disimpan")
+        print(f"💡 Resource saved: No MySQL insert, no ThingsBoard data, no image generated")
+    
+    last_analysis_time = current_time
 
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
@@ -806,8 +814,7 @@ def multisensor():
     
     print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
     
-    # Simpan data mentah ke database (TANPA kirim ke ThingsBoard)
-    # karena ESP32 sudah mengirim data raw langsung ke ThingsBoard
+    # Simpan data mentah ke database
     save_sensor_data(data)
     
     # Tambahkan ke buffer untuk analisis
@@ -823,11 +830,9 @@ def multisensor():
     
     return jsonify({
         "status": "success",
-        "message": "Raw data saved to MySQL only (ESP32 handles ThingsBoard)",
+        "message": "Data processed successfully",
         "timestamp": datetime.now().isoformat(),
-        "data_buffer_count": data_buffer.get_data_count(),
-        "mysql_integration": "active",
-        "note": "Analysis results will be sent to ThingsBoard with fls_ prefix"
+        "data_buffer_count": data_buffer.get_data_count()
     }), 200
 
 @app.route('/status', methods=['GET'])
@@ -888,7 +893,6 @@ def get_analysis():
         limit = request.args.get('limit', 20, type=int)
         offset = request.args.get('offset', 0, type=int)
         classification = request.args.get('classification', None)
-        send_to_tb = request.args.get('send_to_thingsboard', 'false').lower() == 'true'
         
         # Base query
         base_query = "SELECT * FROM road_damage_analysis"
@@ -919,19 +923,10 @@ def get_analysis():
                 except json.JSONDecodeError:
                     analysis['anomalies'] = []
         
-        # Send to ThingsBoard if requested
-        if send_to_tb and analyses:
-            threading.Thread(
-                target=send_mysql_analysis_to_thingsboard,
-                args=(None, True, len(analyses)),
-                daemon=True
-            ).start()
-        
         return jsonify({
             "total": total_count,
             "count": len(analyses),
-            "analyses": analyses,
-            "thingsboard_sent": send_to_tb
+            "analyses": analyses
         })
         
     except Error as e:
@@ -951,7 +946,6 @@ def get_summary():
     
     try:
         cursor = connection.cursor(dictionary=True)
-        send_to_tb = request.args.get('send_to_thingsboard', 'false').lower() == 'true'
         
         # Summary statistics
         stats_query = """
@@ -981,18 +975,10 @@ def get_summary():
         cursor.execute(recent_query)
         recent = cursor.fetchall()
         
-        # Send summary to ThingsBoard if requested
-        if send_to_tb:
-            threading.Thread(
-                target=send_summary_to_thingsboard,
-                daemon=True
-            ).start()
-        
         return jsonify({
             "statistics": stats,
             "recent_activity": recent,
-            "timestamp": datetime.now().isoformat(),
-            "thingsboard_sent": send_to_tb
+            "timestamp": datetime.now().isoformat()
         })
         
     except Error as e:
@@ -1003,52 +989,9 @@ def get_summary():
             cursor.close()
             connection.close()
 
-@app.route('/mysql/sync', methods=['POST'])
-def sync_mysql_to_thingsboard():
-    """Endpoint untuk sinkronisasi manual data MySQL ke ThingsBoard"""
-    try:
-        data = request.get_json() or {}
-        sync_type = data.get('type', 'recent')  # 'recent', 'all', 'summary', 'specific'
-        limit = data.get('limit', 50)
-        analysis_id = data.get('analysis_id', None)
-        
-        sent_count = 0
-        
-        if sync_type == 'specific' and analysis_id:
-            # Sync specific analysis
-            success = send_mysql_analysis_to_thingsboard(analysis_id=analysis_id)
-            sent_count = 1 if success else 0
-            
-        elif sync_type == 'all':
-            # Sync all recent analyses
-            success = send_mysql_analysis_to_thingsboard(send_all=True, limit=limit)
-            sent_count = limit if success else 0
-            
-        elif sync_type == 'recent':
-            # Sync most recent analysis
-            success = send_mysql_analysis_to_thingsboard()
-            sent_count = 1 if success else 0
-            
-        elif sync_type == 'summary':
-            # Send summary data
-            success = send_summary_to_thingsboard()
-            sent_count = 1 if success else 0
-        
-        return jsonify({
-            "status": "success",
-            "message": f"MySQL sync completed: {sent_count} records sent to ThingsBoard",
-            "sync_type": sync_type,
-            "records_sent": sent_count,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in MySQL sync: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/mysql/analysis/<int:analysis_id>/image', methods=['GET'])
-def get_analysis_image(analysis_id):
-    """Endpoint untuk mendapatkan gambar analisis berdasarkan ID"""
+@app.route('/debug/analysis/<int:analysis_id>', methods=['GET'])
+def debug_analysis_data(analysis_id):
+    """Debug endpoint untuk cek data analisis"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
@@ -1057,7 +1000,10 @@ def get_analysis_image(analysis_id):
         cursor = connection.cursor(dictionary=True)
         
         query = """
-        SELECT image_filename, analysis_image 
+        SELECT id, analysis_timestamp, damage_classification, 
+               damage_length, analysis_image IS NOT NULL as has_image_in_db,
+               LENGTH(analysis_image) as image_size,
+               image_filename
         FROM road_damage_analysis 
         WHERE id = %s
         """
@@ -1066,18 +1012,86 @@ def get_analysis_image(analysis_id):
         result = cursor.fetchone()
         
         if not result:
-            return jsonify({"error": "Analysis not found"}), 404
+            return jsonify({"error": f"Analysis ID {analysis_id} not found"}), 404
         
         return jsonify({
-            "analysis_id": analysis_id,
+            "analysis_id": result['id'],
+            "damage_classification": result['damage_classification'],
+            "damage_length": result['damage_length'],
+            "has_image_in_database": result['has_image_in_db'],
+            "image_size_bytes": result['image_size'],
             "image_filename": result['image_filename'],
-            "has_image": result['analysis_image'] is not None,
-            "image_base64": result['analysis_image'] if result['analysis_image'] else None
+            "timestamp": result['analysis_timestamp'].isoformat() if result['analysis_timestamp'] else None
         })
         
     except Error as e:
-        print(f"❌ Error fetching image: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.route('/debug/thingsboard/resend/<int:analysis_id>', methods=['POST'])
+def debug_resend_to_thingsboard(analysis_id):
+    """Debug endpoint untuk mengirim ulang data ke ThingsBoard"""
+    try:
+        success = send_analysis_with_image_to_thingsboard(analysis_id)
+        
+        return jsonify({
+            "success": success,
+            "message": f"Resend to ThingsBoard {'successful' if success else 'failed'}",
+            "analysis_id": analysis_id
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "analysis_id": analysis_id
+        }), 500
+
+@app.route('/analysis/<int:analysis_id>/image', methods=['GET'])
+def get_analysis_image_endpoint(analysis_id):
+    """Endpoint untuk mendapatkan gambar analisis berdasarkan ID"""
+    connection = get_db_connection()
+    if not connection:
+        return "Database connection failed", 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        query = """
+        SELECT analysis_image, damage_classification, analysis_timestamp, image_filename
+        FROM road_damage_analysis 
+        WHERE id = %s
+        """
+        
+        cursor.execute(query, (analysis_id,))
+        result = cursor.fetchone()
+        
+        if not result or not result['analysis_image']:
+            return "Image not found", 404
+        
+        # Decode base64 image
+        from flask import Response
+        import base64
+        
+        image_data = base64.b64decode(result['analysis_image'])
+        
+        filename = result['image_filename'] or f'analysis_{analysis_id}.png'
+        
+        return Response(
+            image_data,
+            mimetype='image/png',
+            headers={
+                'Content-Disposition': f'inline; filename={filename}',
+                'Cache-Control': 'public, max-age=3600',
+                'Content-Type': 'image/png'
+            }
+        )
+        
+    except Exception as e:
+        return f"Error: {str(e)}", 500
     finally:
         if connection.is_connected():
             cursor.close()
@@ -1087,10 +1101,9 @@ def get_analysis_image(analysis_id):
 def test_thingsboard():
     """Endpoint untuk test koneksi ThingsBoard"""
     test_payload = {
-        "test_message": "Flask MySQL integration test",
+        "test_message": "Simplified road monitoring test",
         "test_timestamp": datetime.now().isoformat(),
         "test_status": "active",
-        "test_value": 123.45,
         "mysql_connection": "ok" if get_db_connection() else "failed"
     }
     
@@ -1098,34 +1111,32 @@ def test_thingsboard():
     
     return jsonify({
         "thingsboard_connection": "success" if success else "failed",
-        "test_payload_with_prefix": {f"fls_{k}": v for k, v in test_payload.items()},
         "thingsboard_url": THINGSBOARD_URL,
         "timestamp": datetime.now().isoformat()
     })
 
 if __name__ == '__main__':
-    print("🚀 Road Monitoring Flask Server Starting...")
+    print("🚀 Simplified Road Monitoring Flask Server Starting...")
     print("=" * 60)
     print("📡 Available Endpoints:")
-    print("   - POST /multisensor              : Receive ESP32 sensor data")
-    print("   - GET  /status                   : System status")
-    print("   - GET  /analysis                 : Get analysis results")
-    print("   - GET  /summary                  : Get damage summary")
-    print("   - POST /mysql/sync               : Manual MySQL to ThingsBoard sync")
-    print("   - GET  /mysql/analysis/<id>/image: Get analysis image")
-    print("   - GET  /thingsboard/test         : Test ThingsBoard connection")
+    print("   - POST /multisensor       : Receive ESP32 sensor data")
+    print("   - GET  /status           : System status")
+    print("   - GET  /analysis         : Get analysis results")
+    print("   - GET  /summary          : Get damage summary")
+    print("   - GET  /thingsboard/test : Test ThingsBoard connection")
     print("=" * 60)
     print("🔗 ThingsBoard Integration:")
     print(f"   - Server: {THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}")
     print(f"   - URL: {THINGSBOARD_URL}")
-    print(f"   - Data Prefix: fls_ (Flask MySQL)")
+    print(f"   - Data Prefix: fls_ (Flask)")
     print("=" * 60)
-    print("📊 MySQL Integration:")
-    print("   - Raw sensor data: Saved to MySQL only (ESP32 → ThingsBoard direct)")
-    print("   - Analysis results: MySQL → ThingsBoard with fls_ prefix")
-    print("   - Auto sync: Analysis results sent after saving")
-    print("   - Manual sync: Use /mysql/sync endpoint")
-    print("   - Data source: road_damage_analysis table")
+    print("📊 Simplification Features:")
+    print("   - No scoring system - direct IF-ELSE classification")
+    print("   - Image saved only when damage detected")
+    print("   - Damage length calculated only when damage exists")
+    print("   - Classification uses OR logic (any parameter triggers)")
+    print("   - MySQL & ThingsBoard: DAMAGE DATA ONLY (resource saving)")
+    print("   - Good road conditions: No database insert, no image, no ThingsBoard data")
     print("=" * 60)
     
     # Test database connection
@@ -1139,9 +1150,8 @@ if __name__ == '__main__':
     
     # Test ThingsBoard connection
     test_payload = {
-        "startup_test": "Flask server with MySQL integration starting",
-        "startup_timestamp": datetime.now().isoformat(),
-        "mysql_integration": "enabled"
+        "startup_test": "Simplified Flask server starting",
+        "startup_timestamp": datetime.now().isoformat()
     }
     
     if send_to_thingsboard(test_payload, "startup_test"):

@@ -1,4 +1,5 @@
 # Konfigurasi threshold untuk deteksi anomali dan klasifikasi kerusakan jalan
+# SISTEM KLASIFIKASI SEDERHANA - RULE BASED DENGAN LOGIKA OR
 
 # === THRESHOLD SENSOR ===
 
@@ -12,8 +13,8 @@ SURFACE_CHANGE_THRESHOLDS = {
 # GY-521 Accelerometer Thresholds (untuk deteksi guncangan)
 VIBRATION_THRESHOLDS = {
     'light': 2000,      # Guncangan ringan
-    'moderate': 3000,   # Guncangan sedang 5k
-    'heavy': 4000      # Guncangan berat 10k
+    'moderate': 3000,   # Guncangan sedang
+    'heavy': 4000       # Guncangan berat
 }
 
 # GY-521 Gyroscope Thresholds (untuk deteksi rotasi)
@@ -23,28 +24,25 @@ ROTATION_THRESHOLDS = {
     'excessive': 500    # deg/s - rotasi berlebihan
 }
 
-# GPS Speed Thresholds
-SPEED_THRESHOLDS = {
-    'normal': 60,       # km/h - kecepatan normal
-    'high': 80,         # km/h - kecepatan tinggi
-    'excessive': 120    # km/h - kecepatan berlebihan
-}
+# === KLASIFIKASI KERUSAKAN JALAN (RULE-BASED DENGAN LOGIKA OR) ===
 
-# === KLASIFIKASI KERUSAKAN JALAN ===
-
-# Sistem scoring untuk klasifikasi kerusakan
-DAMAGE_CLASSIFICATION_WEIGHTS = {
-    'surface_change': 0.4,      # 40% - perubahan permukaan paling penting
-    'vibration': 0.3,           # 30% - guncangan
-    'rotation': 0.2,            # 20% - rotasi
-    'frequency': 0.1            # 10% - frekuensi kejadian
-}
-
-# Score thresholds untuk klasifikasi
-DAMAGE_SCORE_THRESHOLDS = {
-    'rusak_ringan': 0.3,        # Score 0.0 - 0.3
-    'rusak_sedang': 0.6,        # Score 0.3 - 0.6
-    'rusak_berat': 1.0          # Score 0.6 - 1.0
+# Threshold untuk klasifikasi langsung dengan logika OR
+DAMAGE_CLASSIFICATION_OR = {
+    'rusak_berat': {
+        'surface_change': 10.0,   # >= 10 cm
+        'vibration': 4000,        # >= 4000
+        'rotation': 500           # >= 500 deg/s
+    },
+    'rusak_sedang': {
+        'surface_change': 5.0,    # >= 5 cm
+        'vibration': 3000,        # >= 3000
+        'rotation': 300           # >= 300 deg/s
+    },
+    'rusak_ringan': {
+        'surface_change': 2.0,    # >= 2 cm
+        'vibration': 2000,        # >= 2000
+        'rotation': 100           # >= 100 deg/s
+    }
 }
 
 # === PARAMETER ANALISIS ===
@@ -52,33 +50,18 @@ DAMAGE_SCORE_THRESHOLDS = {
 # Minimum data points untuk analisis valid
 MIN_DATA_POINTS = 5
 
-# Minimum distance untuk menghitung panjang kerusakan (meter)
-MIN_DAMAGE_LENGTH = 1.0
-
 # Maximum gap antara data points GPS untuk kontinuitas (meter)
 MAX_GPS_GAP = 50.0
-
-# Minimum perubahan untuk dianggap anomali
-MIN_ANOMALY_CHANGE = 1.0
 
 # === PARAMETER GPS ===
 
 # Radius bumi untuk perhitungan jarak (meter)
 EARTH_RADIUS = 6371000
 
-# Minimum akurasi GPS yang diterima (meter)
-MIN_GPS_ACCURACY = 10.0
-
 # === PARAMETER WAKTU ===
 
 # Interval analisis (detik)
 ANALYSIS_INTERVAL = 30
-
-# Cooldown untuk penyimpanan gambar (detik)
-SAVE_COOLDOWN = 5
-
-# Timeout untuk data GPS (detik)
-GPS_TIMEOUT = 10
 
 # === FUNGSI HELPER ===
 
@@ -115,29 +98,110 @@ def get_rotation_severity(rotation_value):
         return 'normal'
     return 'minimal'
 
+def classify_damage_or_logic(max_surface_change, max_vibration, max_rotation):
+    """
+    Klasifikasi kerusakan jalan dengan metode rule-based sederhana menggunakan LOGIKA OR
+    
+    Logika OR:
+    - Jika SALAH SATU parameter memenuhi threshold RUSAK BERAT → RUSAK BERAT
+    - Jika SALAH SATU parameter memenuhi threshold RUSAK SEDANG → RUSAK SEDANG  
+    - Jika SALAH SATU parameter memenuhi threshold RUSAK RINGAN → RUSAK RINGAN
+    - Jika tidak ada yang memenuhi → BAIK
+    
+    Args:
+        max_surface_change (float): Perubahan permukaan maksimum (cm)
+        max_vibration (float): Getaran maksimum
+        max_rotation (float): Rotasi maksimum (deg/s)
+    
+    Returns:
+        str: Klasifikasi kerusakan ('rusak_berat', 'rusak_sedang', 'rusak_ringan', 'baik')
+    """
+    
+    # Set default values untuk data yang None
+    surface = max_surface_change if max_surface_change is not None else 0
+    vibration = max_vibration if max_vibration is not None else 0
+    rotation = max_rotation if max_rotation is not None else 0
+    
+    print(f"🔍 Klasifikasi OR Logic: Surface={surface:.2f}cm, Vibration={vibration:.0f}, Rotation={rotation:.0f}°/s")
+    
+    # Cek RUSAK BERAT (SALAH SATU parameter memenuhi)
+    if (surface >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['surface_change'] or
+        vibration >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['vibration'] or
+        rotation >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['rotation']):
+        
+        # Tentukan parameter mana yang memicu
+        trigger = []
+        if surface >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['surface_change']:
+            trigger.append(f"Surface({surface:.1f}cm)")
+        if vibration >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['vibration']:
+            trigger.append(f"Vibration({vibration:.0f})")
+        if rotation >= DAMAGE_CLASSIFICATION_OR['rusak_berat']['rotation']:
+            trigger.append(f"Rotation({rotation:.0f}°/s)")
+        
+        print(f"📊 Klasifikasi: RUSAK BERAT - Trigger: {', '.join(trigger)}")
+        return 'rusak_berat'
+    
+    # Cek RUSAK SEDANG (SALAH SATU parameter memenuhi)
+    elif (surface >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['surface_change'] or
+          vibration >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['vibration'] or
+          rotation >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['rotation']):
+        
+        # Tentukan parameter mana yang memicu
+        trigger = []
+        if surface >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['surface_change']:
+            trigger.append(f"Surface({surface:.1f}cm)")
+        if vibration >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['vibration']:
+            trigger.append(f"Vibration({vibration:.0f})")
+        if rotation >= DAMAGE_CLASSIFICATION_OR['rusak_sedang']['rotation']:
+            trigger.append(f"Rotation({rotation:.0f}°/s)")
+        
+        print(f"📊 Klasifikasi: RUSAK SEDANG - Trigger: {', '.join(trigger)}")
+        return 'rusak_sedang'
+    
+    # Cek RUSAK RINGAN (SALAH SATU parameter memenuhi)
+    elif (surface >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['surface_change'] or
+          vibration >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['vibration'] or
+          rotation >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['rotation']):
+        
+        # Tentukan parameter mana yang memicu
+        trigger = []
+        if surface >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['surface_change']:
+            trigger.append(f"Surface({surface:.1f}cm)")
+        if vibration >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['vibration']:
+            trigger.append(f"Vibration({vibration:.0f})")
+        if rotation >= DAMAGE_CLASSIFICATION_OR['rusak_ringan']['rotation']:
+            trigger.append(f"Rotation({rotation:.0f}°/s)")
+        
+        print(f"📊 Klasifikasi: RUSAK RINGAN - Trigger: {', '.join(trigger)}")
+        return 'rusak_ringan'
+    
+    # Jika tidak ada yang memenuhi, jalan masih dalam kondisi baik
+    else:
+        print("📊 Klasifikasi: BAIK - Tidak ada parameter yang mencapai threshold kerusakan")
+        return 'baik'
+
+# === FUNGSI UNTUK BACKWARD COMPATIBILITY ===
+
+def classify_damage_simple(max_surface_change, max_vibration, max_rotation):
+    """Alias untuk kompatibilitas - menggunakan logika OR"""
+    return classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
+
+def classify_damage_flexible(max_surface_change, max_vibration, max_rotation):
+    """Alias untuk kompatibilitas - menggunakan logika OR"""
+    return classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
+
 def calculate_damage_score(surface_changes, vibrations, rotations, frequency_factor):
-    """Menghitung skor kerusakan berdasarkan semua parameter"""
-    
-    # Normalisasi nilai ke skala 0-1
-    surface_score = min(max(surface_changes) / SURFACE_CHANGE_THRESHOLDS['major'], 1.0) if surface_changes else 0
-    vibration_score = min(max(vibrations) / VIBRATION_THRESHOLDS['heavy'], 1.0) if vibrations else 0
-    rotation_score = min(max(rotations) / ROTATION_THRESHOLDS['excessive'], 1.0) if rotations else 0
-    
-    # Hitung weighted score
-    total_score = (
-        surface_score * DAMAGE_CLASSIFICATION_WEIGHTS['surface_change'] +
-        vibration_score * DAMAGE_CLASSIFICATION_WEIGHTS['vibration'] +
-        rotation_score * DAMAGE_CLASSIFICATION_WEIGHTS['rotation'] +
-        frequency_factor * DAMAGE_CLASSIFICATION_WEIGHTS['frequency']
-    )
-    
-    return min(total_score, 1.0)
+    """
+    Fungsi ini masih ada untuk kompatibilitas dengan kode lama,
+    tapi sekarang tidak digunakan karena tidak ada scoring
+    """
+    # Return dummy score 0 karena tidak digunakan lagi
+    return 0
 
 def classify_damage(damage_score):
-    """Mengklasifikasikan tingkat kerusakan berdasarkan skor"""
-    if damage_score >= DAMAGE_SCORE_THRESHOLDS['rusak_berat']:
-        return 'rusak_berat'
-    elif damage_score >= DAMAGE_SCORE_THRESHOLDS['rusak_sedang']:
-        return 'rusak_sedang'
-    else:
-        return 'rusak_ringan'
+    """
+    Fungsi ini masih ada untuk kompatibilitas dengan kode lama,
+    tapi sekarang tidak digunakan karena tidak ada scoring
+    """
+    # Return default 'baik' karena tidak digunakan lagi
+    return 'baik'
