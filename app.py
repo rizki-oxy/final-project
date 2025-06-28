@@ -18,7 +18,7 @@ from thresholds import (
     MIN_DATA_POINTS, ANALYSIS_INTERVAL, EARTH_RADIUS, MAX_GPS_GAP,
     SURFACE_CHANGE_THRESHOLDS, VIBRATION_THRESHOLDS, ROTATION_THRESHOLDS,
     get_surface_change_severity, get_vibration_severity, get_rotation_severity,
-    classify_damage_or_logic
+    classify_damage_or_logic  # MASIH PAKAI NAMA YANG SAMA, TAPI FUNGSINYA SUDAH BERUBAH
 )
 
 # Load environment variables
@@ -322,14 +322,7 @@ def detect_anomalies(data_points):
             'severity': get_vibration_severity(vibration_analysis['max_vibration'])
         })
     
-    # Analisis rotasi
-    rotation_analysis = analyze_rotations(data_points)
-    if rotation_analysis['count'] > 0:
-        anomalies.append({
-            'type': 'rotation',
-            'details': rotation_analysis,
-            'severity': get_rotation_severity(rotation_analysis['max_rotation'])
-        })
+    
     
     return anomalies
 
@@ -709,7 +702,7 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
             connection.close()
 
 def perform_30s_analysis():
-    """Melakukan analisis komprehensif setiap 30 detik dengan logika OR sederhana"""
+    """Melakukan analisis komprehensif setiap 30 detik dengan logika AND sederhana"""
     global last_analysis_time
     
     current_time = time.time()
@@ -739,12 +732,12 @@ def perform_30s_analysis():
                 start_location = (data['latitude'], data['longitude'])
             end_location = (data['latitude'], data['longitude'])
     
-    # === KLASIFIKASI SEDERHANA DENGAN LOGIKA OR ===
+    # === KLASIFIKASI SEDERHANA DENGAN LOGIKA AND ===
     max_surface_change = surface_analysis['max_change']
     max_vibration = vibration_analysis['max_vibration'] 
     max_rotation = rotation_analysis['max_rotation']
     
-    # Gunakan fungsi klasifikasi dari thresholds.py dengan logika OR
+    # Gunakan fungsi klasifikasi dari thresholds.py dengan logika AND (ROTASI DIHAPUS)
     damage_classification = classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
     
     # Hanya hitung panjang kerusakan jika ada kerusakan
@@ -754,7 +747,7 @@ def perform_30s_analysis():
     print(f"📊 Parameter Klasifikasi:")
     print(f"   - Perubahan Permukaan Max: {max_surface_change:.2f} cm")
     print(f"   - Getaran Max: {max_vibration:.0f}")
-    print(f"   - Rotasi Max: {max_rotation:.0f} deg/s")
+    print(f"   - Rotasi Max: {max_rotation:.0f} deg/s (TIDAK DIGUNAKAN)")
     print(f"   - Hasil Klasifikasi: {damage_classification.upper().replace('_', ' ')}")
     print(f"   - Panjang Kerusakan: {damage_length:.1f}m")
     
@@ -781,7 +774,7 @@ def perform_30s_analysis():
         
         try:
             image_path, image_filename = create_analysis_visualization(analysis_data)
-            print(f"📸 Gambaranalisis dibuat: {image_filename}")
+            print(f"📸 Gambar analisis dibuat: {image_filename}")
         except Exception as e:
             print(f"❌ Error membuat visualisasi: {e}")
         
@@ -1101,7 +1094,7 @@ def get_analysis_image_endpoint(analysis_id):
 def test_thingsboard():
     """Endpoint untuk test koneksi ThingsBoard"""
     test_payload = {
-        "test_message": "Simplified road monitoring test",
+        "test_message": "Road monitoring test with AND logic",
         "test_timestamp": datetime.now().isoformat(),
         "test_status": "active",
         "mysql_connection": "ok" if get_db_connection() else "failed"
@@ -1116,7 +1109,7 @@ def test_thingsboard():
     })
 
 if __name__ == '__main__':
-    print("🚀 Simplified Road Monitoring Flask Server Starting...")
+    print("🚀 Road Monitoring Flask Server Starting...")
     print("=" * 60)
     print("📡 Available Endpoints:")
     print("   - POST /multisensor       : Receive ESP32 sensor data")
@@ -1130,13 +1123,22 @@ if __name__ == '__main__':
     print(f"   - URL: {THINGSBOARD_URL}")
     print(f"   - Data Prefix: fls_ (Flask)")
     print("=" * 60)
-    print("📊 Simplification Features:")
-    print("   - No scoring system - direct IF-ELSE classification")
+    print("📊 PERUBAHAN SISTEM KLASIFIKASI:")
+    print("   ✅ ROTASI DIHAPUS dari parameter klasifikasi")
+    print("   ✅ Logika OR diubah menjadi AND")
+    print("   ✅ Klasifikasi sekarang: Surface Change AND Vibration")
+    print("   ✅ KEDUA parameter harus memenuhi threshold untuk deteksi kerusakan")
+    print("=" * 60)
+    print("🔄 Classification Rules (AND Logic):")
+    print("   - RUSAK BERAT: Surface ≥10cm AND Vibration ≥4000")
+    print("   - RUSAK SEDANG: Surface ≥5cm AND Vibration ≥3000")
+    print("   - RUSAK RINGAN: Surface ≥2cm AND Vibration ≥2000")
+    print("   - BAIK: Jika salah satu parameter tidak memenuhi threshold")
+    print("=" * 60)
+    print("💾 Resource Optimization:")
     print("   - Image saved only when damage detected")
-    print("   - Damage length calculated only when damage exists")
-    print("   - Classification uses OR logic (any parameter triggers)")
-    print("   - MySQL & ThingsBoard: DAMAGE DATA ONLY (resource saving)")
-    print("   - Good road conditions: No database insert, no image, no ThingsBoard data")
+    print("   - MySQL & ThingsBoard: DAMAGE DATA ONLY")
+    print("   - Good road conditions: No database insert, no image")
     print("=" * 60)
     
     # Test database connection
@@ -1150,8 +1152,9 @@ if __name__ == '__main__':
     
     # Test ThingsBoard connection
     test_payload = {
-        "startup_test": "Simplified Flask server starting",
-        "startup_timestamp": datetime.now().isoformat()
+        "startup_test": "Flask server starting with AND logic",
+        "startup_timestamp": datetime.now().isoformat(),
+        "classification_change": "Rotation removed, OR changed to AND"
     }
     
     if send_to_thingsboard(test_payload, "startup_test"):
