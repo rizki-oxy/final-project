@@ -1,11 +1,35 @@
 #include <WiFi.h>
 #include <TinyGPS++.h>
 #include <Wire.h>
-#include <EEPROM.h>
+#include <HTTPClient.h>
+#include <PubSubClient.h>
+
+// WiFi & MQTT Configuration
+const char* ssid = "fff";
+const char* password = "halo1234000";
+const char* mqtt_server = "192.168.43.18";
+const int mqtt_port = 1883;
+const char* access_token = "0939gxC3IXo3uoCIgAED";
+
+// ThingsBoard HTTP Configuration
+const char* thingsboard_server = "192.168.43.18";  // ThingsBoard demo server
+const int thingsboard_port = 8081;  // Default ThingsBoard port
+const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Communication status tracking
+bool mqttConnected = false;
+unsigned long lastMqttAttempt = 0;
+const unsigned long mqttRetryInterval = 5000;  // Retry MQTT every 5 seconds
+unsigned long mqttFailCount = 0;
+unsigned long httpSuccessCount = 0;
+unsigned long httpFailCount = 0;
 
 // GPS Configuration
-#define GPS_RX_PIN 16
-#define GPS_TX_PIN 17
+#define GPS_RX_PIN 16  // ESP32 menerima data dari GPS
+#define GPS_TX_PIN 17  // ESP32 mengirim data ke GPS
 #define GPS_BAUD 9600
 
 // MPU6050 Configuration
@@ -14,597 +38,534 @@
 #define ACCEL_XOUT_H 0x3B
 #define GYRO_XOUT_H 0x43
 
-// ESP32 I2C Pins
+// ESP32 I2C Pins (Reserved for GY-521)
 #define SDA_PIN 21
 #define SCL_PIN 22
 
 // Ultrasonic Sensor Pins
-int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};
-int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};
+int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};      // Trigger pins
+int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};   // Echo pins
 
 // GPS Objects
 TinyGPSPlus gps;
 HardwareSerial GPSSerial(2);
 
-// Calibration Data Structures
-struct MPU6050_Calibration {
-  float accelOffsetX, accelOffsetY, accelOffsetZ;
-  float gyroOffsetX, gyroOffsetY, gyroOffsetZ;
-  float accelScaleX, accelScaleY, accelScaleZ;
-  float gyroScale;
-  bool isCalibrated;
-};
+// GPS Variables
+unsigned long lastGPSCheckTime = 0;
+const unsigned long gpsCheckInterval = 3000;  // Check GPS every 3 seconds
+unsigned long lastGPSDataTime = 0;
+const unsigned long gpsDataTimeout = 5000;
+bool gpsHardwareConnected = false;
+bool gpsWorking = false;
+unsigned long lastCharsProcessed = 0;
+unsigned long rawGPSDataCount = 0;
 
-struct UltrasonicCalibration {
-  float offset[8];        // Offset untuk setiap sensor
-  float scaleFactor[8];   // Scale factor untuk setiap sensor
-  float maxDistance[8];   // Max distance yang valid
-  bool isCalibrated;
-};
+// MPU6050 Variables
+int16_t accelX, accelY, accelZ;
+int16_t gyroX, gyroY, gyroZ;
+float accelMagnitude = 0;        // tambahan untuk magnitudo getaran
+float rotationMagnitude = 0;     // tambahan untuk magnitudo rotasi
+float prevAccelMagnitude = 0;
+float vibrationThreshold = 2.0;
+float rotationThreshold = 500;
+bool sensorDetected = false;
+unsigned long lastSensorCheckTime = 0;
+const unsigned long sensorCheckInterval = 1000;  // Check sensor every 1 second
 
-// Global calibration variables
-MPU6050_Calibration mpuCal;
-UltrasonicCalibration ultraCal;
+// Ultrasonic Variables
+unsigned long lastUltrasonicTime = 0;
+const unsigned long ultrasonicInterval = 1000;  // Read ultrasonic every 1 second
+float distances[8];
 
-// EEPROM addresses
-#define EEPROM_SIZE 512
-#define MPU_CAL_ADDR 0
-#define ULTRA_CAL_ADDR 100
-
-// Calibration settings
-#define CALIBRATION_SAMPLES 1000
-#define ULTRASONIC_SAMPLES 50
+// System Variables
+unsigned long lastDataSendTime = 0;
+const unsigned long dataSendInterval = 2000;  // Send data every 2 seconds
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  delay(1000);
   
-  Serial.println("\n🔧 ===== ESP32 MULTI-SENSOR CALIBRATION =====");
-  Serial.println("📍 GPS + 🔄 GY-521 + 📏 8x Ultrasonic Sensors");
-  Serial.println("============================================");
+  Serial.println("\n=== ESP32 Multi-Sensor System ===");
+  Serial.println("GPS + GY-521 + Ultrasonic Array");
+  Serial.println("MQTT + HTTP Backup Communication");
+  Serial.println("=================================");
   
-  // Initialize EEPROM
-  EEPROM.begin(EEPROM_SIZE);
+  // Initialize WiFi
+  setup_wifi();
   
-  // Initialize I2C
+  // Initialize MQTT
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(mqttCallback);
+  
+  // Initialize I2C for MPU6050
   Wire.begin(SDA_PIN, SCL_PIN);
   
-  // Initialize GPS
+  // Initialize GPS Serial
+  Serial.println("🛰️ Inisialisasi GPS...");
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  delay(1000);
+  lastGPSDataTime = millis();
   
-  // Initialize Ultrasonic pins
-  for (int i = 0; i < 8; i++) {
-    pinMode(trigPins[i], OUTPUT);
-    pinMode(echoPins[i], INPUT);
-  }
+  // Check and initialize MPU6050
+  Serial.println("🔄 Checking GY-521 sensor...");
+  checkSensorConnection();
   
-  // Check if sensors are connected
-  checkSensorConnections();
-  
-  // Show calibration menu
-  showMainMenu();
-}
-
-void loop() {
-  if (Serial.available()) {
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-    handleMenuInput(input);
-  }
-  delay(100);
-}
-
-void checkSensorConnections() {
-  Serial.println("\n🔍 Checking sensor connections...");
-  
-  // Check MPU6050
-  Wire.beginTransmission(MPU6050_ADDR);
-  byte error = Wire.endTransmission();
-  if (error == 0) {
-    Serial.println("✅ GY-521 (MPU6050) detected!");
+  if (sensorDetected) {
     // Wake up MPU6050
     Wire.beginTransmission(MPU6050_ADDR);
     Wire.write(PWR_MGMT_1);
     Wire.write(0);
     Wire.endTransmission(true);
-  } else {
-    Serial.println("❌ GY-521 (MPU6050) NOT detected!");
+    Serial.println("✅ GY-521 sensor initialized!");
   }
   
-  // Check GPS
-  Serial.println("🛰️ GPS Module check (akan dicek saat kalibrasi)");
-  
-  // Quick check ultrasonic sensors
-  Serial.println("📏 Ultrasonic sensors check...");
+  // Initialize Ultrasonic sensors
+  Serial.println("📏 Inisialisasi Ultrasonic sensors...");
   for (int i = 0; i < 8; i++) {
-    float distance = readUltrasonicDistance(i);
-    Serial.print("  Sensor ");
-    Serial.print(i + 1);
-    Serial.print(": ");
-    if (distance > 0) {
-      Serial.println("✅ OK");
-    } else {
-      Serial.println("⚠️ Check connection");
-    }
+    pinMode(trigPins[i], OUTPUT);
+    pinMode(echoPins[i], INPUT);
   }
+  Serial.println("✅ Ultrasonic sensors initialized!");
+  
+  Serial.println("\n--- MULTI-SENSOR MONITORING STARTED ---");
+  Serial.println("📡 Communication: MQTT Primary + HTTP Backup");
+  Serial.println();
 }
 
-void showMainMenu() {
-  Serial.println("\n🎯 ===== CALIBRATION MENU =====");
-  Serial.println("1. Calibrate GY-521 (MPU6050)");
-  Serial.println("2. Calibrate Ultrasonic Sensors");
-  Serial.println("3. Calibrate GPS (Info Check)");
-  Serial.println("4. Calibrate ALL Sensors");
-  Serial.println("5. Show Current Calibration Data");
-  Serial.println("6. Save Calibration to EEPROM");
-  Serial.println("7. Load Calibration from EEPROM");
-  Serial.println("8. Reset All Calibration");
-  Serial.println("9. Test Calibrated Values");
-  Serial.println("0. Exit Calibration Mode");
-  Serial.println("==============================");
-  Serial.print("Pilih opsi (0-9): ");
+void loop() {
+  unsigned long currentTime = millis();
+  
+  // Handle MQTT connection with retry logic
+  handleMqttConnection();
+  
+  // Process GPS data continuously
+  processGPSData(currentTime);
+  
+  // Check GPS status periodically
+  if (currentTime - lastGPSCheckTime >= gpsCheckInterval) {
+    checkGPSStatus(currentTime);
+    lastGPSCheckTime = currentTime;
+  }
+  
+  // Check motion sensor periodically
+  if (currentTime - lastSensorCheckTime >= sensorCheckInterval) {
+    processSensorData();
+    lastSensorCheckTime = currentTime;
+  }
+  
+  // Read ultrasonic sensors periodically
+  if (currentTime - lastUltrasonicTime >= ultrasonicInterval) {
+    readAllUltrasonicSensors();
+    lastUltrasonicTime = currentTime;
+  }
+  
+  // Send all data periodically
+  if (currentTime - lastDataSendTime >= dataSendInterval) {
+    sendAllSensorData();
+    lastDataSendTime = currentTime;
+  }
+  
+  delay(10);
 }
 
-void handleMenuInput(String input) {
-  int choice = input.toInt();
+void setup_wifi() {
+  Serial.print("🔌 Menghubungkan ke WiFi...");
+  WiFi.begin(ssid, password);
   
-  switch (choice) {
-    case 1:
-      calibrateMPU6050();
-      break;
-    case 2:
-      calibrateUltrasonicSensors();
-      break;
-    case 3:
-      checkGPSInfo();
-      break;
-    case 4:
-      calibrateAllSensors();
-      break;
-    case 5:
-      showCalibrationData();
-      break;
-    case 6:
-      saveCalibrationToEEPROM();
-      break;
-    case 7:
-      loadCalibrationFromEEPROM();
-      break;
-    case 8:
-      resetAllCalibration();
-      break;
-    case 9:
-      testCalibratedValues();
-      break;
-    case 0:
-      Serial.println("🚪 Exiting calibration mode...");
-      Serial.println("Reset ESP32 untuk kembali ke mode normal");
-      while(1) delay(1000);
-      break;
-    default:
-      Serial.println("❌ Invalid option!");
-      break;
-  }
-  showMainMenu();
-}
-
-void calibrateMPU6050() {
-  Serial.println("\n🔄 ===== GY-521 (MPU6050) CALIBRATION =====");
-  Serial.println("📌 PENTING: Letakkan sensor di permukaan DATAR dan STABIL");
-  Serial.println("⏳ Tunggu 5 detik untuk persiapan...");
-  
-  for (int i = 5; i > 0; i--) {
-    Serial.print(i);
-    Serial.print("... ");
-    delay(1000);
-  }
-  Serial.println("\n🔄 Mulai kalibrasi...");
-  
-  // Reset calibration values
-  mpuCal.accelOffsetX = 0;
-  mpuCal.accelOffsetY = 0;
-  mpuCal.accelOffsetZ = 0;
-  mpuCal.gyroOffsetX = 0;
-  mpuCal.gyroOffsetY = 0;
-  mpuCal.gyroOffsetZ = 0;
-  
-  long accelSumX = 0, accelSumY = 0, accelSumZ = 0;
-  long gyroSumX = 0, gyroSumY = 0, gyroSumZ = 0;
-  
-  Serial.print("📊 Mengambil ");
-  Serial.print(CALIBRATION_SAMPLES);
-  Serial.println(" sampel data...");
-  
-  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
-    int16_t ax, ay, az, gx, gy, gz;
-    readRawMPU6050(&ax, &ay, &az, &gx, &gy, &gz);
-    
-    accelSumX += ax;
-    accelSumY += ay;
-    accelSumZ += az;
-    gyroSumX += gx;
-    gyroSumY += gy;
-    gyroSumZ += gz;
-    
-    if (i % 100 == 0) {
-      Serial.print(".");
-    }
-    delay(10);
-  }
-  
-  // Calculate offsets
-  mpuCal.accelOffsetX = (float)accelSumX / CALIBRATION_SAMPLES;
-  mpuCal.accelOffsetY = (float)accelSumY / CALIBRATION_SAMPLES;
-  mpuCal.accelOffsetZ = (float)accelSumZ / CALIBRATION_SAMPLES - 16384; // -1g for Z-axis
-  mpuCal.gyroOffsetX = (float)gyroSumX / CALIBRATION_SAMPLES;
-  mpuCal.gyroOffsetY = (float)gyroSumY / CALIBRATION_SAMPLES;
-  mpuCal.gyroOffsetZ = (float)gyroSumZ / CALIBRATION_SAMPLES;
-  
-  // Set scale factors (convert to real units)
-  mpuCal.accelScaleX = 16384.0; // LSB/g for ±2g range
-  mpuCal.accelScaleY = 16384.0;
-  mpuCal.accelScaleZ = 16384.0;
-  mpuCal.gyroScale = 131.0;     // LSB/(°/s) for ±250°/s range
-  
-  mpuCal.isCalibrated = true;
-  
-  // Tampilkan hasil dalam raw values (seperti biasa)
-  Serial.println("\n✅ GY-521 Calibration Complete!");
-  Serial.println("📊 Raw Calibration Results:");
-  Serial.printf("   Accel Offsets: X=%.2f, Y=%.2f, Z=%.2f\n", 
-                mpuCal.accelOffsetX, mpuCal.accelOffsetY, mpuCal.accelOffsetZ);
-  Serial.printf("   Gyro Offsets: X=%.2f, Y=%.2f, Z=%.2f\n", 
-                mpuCal.gyroOffsetX, mpuCal.gyroOffsetY, mpuCal.gyroOffsetZ);
-  
-  // TAMBAHAN: Konversi ke unit nyata untuk referensi
-  Serial.println("\n🔧 Converted to Real Units:");
-  Serial.printf("   Accel Offsets: X=%.3fg, Y=%.3fg, Z=%.3fg\n", 
-                mpuCal.accelOffsetX / 16384.0, 
-                mpuCal.accelOffsetY / 16384.0, 
-                mpuCal.accelOffsetZ / 16384.0);
-  Serial.printf("   Gyro Offsets: X=%.2f°/s, Y=%.2f°/s, Z=%.2f°/s\n", 
-                mpuCal.gyroOffsetX / 131.0, 
-                mpuCal.gyroOffsetY / 131.0, 
-                mpuCal.gyroOffsetZ / 131.0);
-  
-  // Test real-time conversion
-  Serial.println("\n🧪 Testing Real-time Conversion (5 samples):");
-  for (int i = 0; i < 5; i++) {
+  unsigned long wifiStartTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStartTime < 15000) {
     delay(500);
-    int16_t ax, ay, az, gx, gy, gz;
-    readRawMPU6050(&ax, &ay, &az, &gx, &gy, &gz);
-    
-    // Apply calibration and convert to real units
-    float accelX_g = (ax - mpuCal.accelOffsetX) / mpuCal.accelScaleX;
-    float accelY_g = (ay - mpuCal.accelOffsetY) / mpuCal.accelScaleY;
-    float accelZ_g = (az - mpuCal.accelOffsetZ) / mpuCal.accelScaleZ;
-    
-    float gyroX_dps = (gx - mpuCal.gyroOffsetX) / mpuCal.gyroScale;
-    float gyroY_dps = (gy - mpuCal.gyroOffsetY) / mpuCal.gyroScale;
-    float gyroZ_dps = (gz - mpuCal.gyroOffsetZ) / mpuCal.gyroScale;
-    
-    Serial.printf("   Sample %d - Accel: X=%.3fg Y=%.3fg Z=%.3fg | Gyro: X=%.1f°/s Y=%.1f°/s Z=%.1f°/s\n", 
-                  i+1, accelX_g, accelY_g, accelZ_g, gyroX_dps, gyroY_dps, gyroZ_dps);
+    Serial.print(".");
   }
   
-  // Evaluasi hasil kalibrasi
-  Serial.println("\n📋 Calibration Quality Check:");
-  if (abs(mpuCal.accelOffsetX / 16384.0) < 0.1 && abs(mpuCal.accelOffsetY / 16384.0) < 0.1) {
-    Serial.println("   ✅ Horizontal acceleration offsets look good (< 0.1g)");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi terhubung!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
   } else {
-    Serial.println("   ⚠️ High horizontal acceleration offsets - check sensor positioning");
-  }
-  
-  if (abs(mpuCal.gyroOffsetX / 131.0) < 5 && abs(mpuCal.gyroOffsetY / 131.0) < 5 && abs(mpuCal.gyroOffsetZ / 131.0) < 5) {
-    Serial.println("   ✅ Gyroscope offsets look good (< 5°/s)");
-  } else {
-    Serial.println("   ⚠️ High gyroscope offsets - sensor might need to settle more");
+    Serial.println("\n⚠️ WiFi gagal terhubung!");
   }
 }
 
-void calibrateUltrasonicSensors() {
-  Serial.println("\n📏 ===== ULTRASONIC SENSORS CALIBRATION =====");
-  Serial.println("📌 PENTING: ");
-  Serial.println("   1. Pastikan semua sensor menghadap objek yang sama");
-  Serial.println("   2. Jarak objek sekitar 10-30 cm dari sensor");
-  Serial.println("   3. Objek berupa dinding/permukaan datar");
-  Serial.println("⏳ Siapkan posisi sensor, tunggu 5 detik...");
-  
-  for (int i = 5; i > 0; i--) {
-    Serial.print(i);
-    Serial.print("... ");
-    delay(1000);
-  }
-  Serial.println("\n📏 Mulai kalibrasi ultrasonic...");
-  
-  // Get reference distance (manual input)
-  Serial.print("📐 Masukkan jarak referensi dalam cm (10-100): ");
-  while (!Serial.available()) delay(100);
-  float referenceDistance = Serial.readStringUntil('\n').toFloat();
-  Serial.println(referenceDistance);
-  
-  if (referenceDistance < 5 || referenceDistance > 200) {
-    Serial.println("❌ Jarak referensi tidak valid!");
-    return;
-  }
-  
-  // Calibrate each sensor
-  for (int sensor = 0; sensor < 8; sensor++) {
-    Serial.print("🔧 Kalibrasi Sensor ");
-    Serial.print(sensor + 1);
-    Serial.print("...");
+void handleMqttConnection() {
+  if (!client.connected()) {
+    mqttConnected = false;
+    unsigned long currentTime = millis();
     
-    float totalDistance = 0;
-    int validSamples = 0;
-    
-    for (int i = 0; i < ULTRASONIC_SAMPLES; i++) {
-      float distance = readUltrasonicDistance(sensor);
-      if (distance > 0 && distance < 400) {
-        totalDistance += distance;
-        validSamples++;
+    // Only try to reconnect after retry interval
+    if (currentTime - lastMqttAttempt >= mqttRetryInterval) {
+      Serial.print("🔄 Mencoba koneksi MQTT...");
+      if (client.connect("ESP32MultiSensor", access_token, NULL)) {
+        Serial.println(" ✅ MQTT terhubung");
+        mqttConnected = true;
+        mqttFailCount = 0;
+      } else {
+        Serial.print(" ❌ MQTT gagal, rc=");
+        Serial.println(client.state());
+        mqttFailCount++;
+        Serial.println("⚠️ Akan menggunakan HTTP backup");
       }
-      delay(50);
+      lastMqttAttempt = currentTime;
     }
-    
-    if (validSamples > ULTRASONIC_SAMPLES / 2) {
-      float avgDistance = totalDistance / validSamples;
-      ultraCal.scaleFactor[sensor] = referenceDistance / avgDistance;
-      ultraCal.offset[sensor] = 0; // Can be adjusted if needed
-      ultraCal.maxDistance[sensor] = 400; // Maximum valid distance
-      Serial.printf(" ✅ (avg: %.2f cm, scale: %.3f)\n", avgDistance, ultraCal.scaleFactor[sensor]);
+  } else {
+    mqttConnected = true;
+    client.loop();
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Handle MQTT messages if needed
+}
+
+bool sendDataViaMqtt(String payload) {
+  if (!mqttConnected || !client.connected()) {
+    return false;
+  }
+  
+  bool success = client.publish("v1/devices/me/telemetry", payload.c_str());
+  if (success) {
+    Serial.println("✅ MQTT: Data terkirim");
+  } else {
+    Serial.println("❌ MQTT: Gagal kirim data");
+    mqttConnected = false;
+  }
+  return success;
+}
+
+bool sendDataViaHttp(String payload) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ HTTP: WiFi tidak terhubung");
+    return false;
+  }
+  
+  HTTPClient http;
+  http.begin(thingsboard_url);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);  // 5 second timeout
+  
+  int httpResponseCode = http.POST(payload);
+  
+  if (httpResponseCode > 0) {
+    if (httpResponseCode == 200) {
+      Serial.println("✅ HTTP: Data terkirim ke ThingsBoard");
+      httpSuccessCount++;
+      http.end();
+      return true;
     } else {
-      Serial.println(" ❌ Gagal - data tidak valid");
-      ultraCal.scaleFactor[sensor] = 1.0;
-      ultraCal.offset[sensor] = 0;
-      ultraCal.maxDistance[sensor] = 400;
+      Serial.print("⚠️ HTTP: Response code ");
+      Serial.println(httpResponseCode);
     }
-  }
-  
-  ultraCal.isCalibrated = true;
-  Serial.println("✅ Ultrasonic Calibration Complete!");
-}
-
-void checkGPSInfo() {
-  Serial.println("\n🛰️ ===== GPS MODULE CHECK =====");
-  Serial.println("📡 Checking GPS module communication...");
-  Serial.println("⏳ Tunggu 30 detik untuk data GPS...");
-  
-  unsigned long startTime = millis();
-  unsigned long lastUpdate = 0;
-  int satelliteCount = 0;
-  bool locationFound = false;
-  
-  while (millis() - startTime < 30000) {
-    while (GPSSerial.available() > 0) {
-      if (gps.encode(GPSSerial.read())) {
-        if (millis() - lastUpdate > 2000) {
-          lastUpdate = millis();
-          
-          Serial.print("📊 GPS Status: ");
-          if (gps.location.isValid()) {
-            if (!locationFound) {
-              Serial.println("🛰️ LOCATION ACQUIRED!");
-              locationFound = true;
-            }
-            Serial.printf("   📍 Lat: %.6f, Lng: %.6f\n", 
-                         gps.location.lat(), gps.location.lng());
-          } else {
-            Serial.println("🔍 Searching for satellites...");
-          }
-          
-          if (gps.satellites.isValid()) {
-            satelliteCount = gps.satellites.value();
-            Serial.printf("   🛰️ Satellites: %d\n", satelliteCount);
-          }
-          
-          if (gps.speed.isValid()) {
-            Serial.printf("   🚗 Speed: %.2f km/h\n", gps.speed.kmph());
-          }
-          
-          if (gps.hdop.isValid()) {
-            Serial.printf("   📡 HDOP: %.2f\n", gps.hdop.hdop());
-          }
-        }
-      }
-    }
-    delay(100);
-  }
-  
-  Serial.println("\n📊 GPS Check Results:");
-  Serial.printf("   Location Found: %s\n", locationFound ? "✅ YES" : "❌ NO");
-  Serial.printf("   Max Satellites: %d\n", satelliteCount);
-  Serial.printf("   Characters Processed: %lu\n", gps.charsProcessed());
-  Serial.printf("   Failed Checksums: %lu\n", gps.failedChecksum());
-  
-  if (locationFound && satelliteCount >= 4) {
-    Serial.println("✅ GPS Module Working Properly!");
-  } else if (gps.charsProcessed() > 0) {
-    Serial.println("⚠️ GPS Module Connected but Poor Signal");
   } else {
-    Serial.println("❌ GPS Module Not Responding");
+    Serial.print("❌ HTTP: Error ");
+    Serial.println(http.errorToString(httpResponseCode));
+  }
+  
+  httpFailCount++;
+  http.end();
+  return false;
+}
+
+void processGPSData(unsigned long currentTime) {
+  while (GPSSerial.available() > 0) {
+    char c = GPSSerial.read();
+    rawGPSDataCount++;
+    gps.encode(c);
+    lastGPSDataTime = currentTime;
   }
 }
 
-void calibrateAllSensors() {
-  Serial.println("\n🚀 ===== CALIBRATING ALL SENSORS =====");
+void checkGPSStatus(unsigned long currentTime) {
+  // Check hardware connection
+  if (rawGPSDataCount > 0 && !gpsHardwareConnected) {
+    gpsHardwareConnected = true;
+    Serial.println("✅ GPS Hardware Connected!");
+  }
   
-  Serial.println("\n1️⃣ Starting GPS Check...");
-  checkGPSInfo();
+  // Check GPS functionality
+  if (gpsHardwareConnected && gps.charsProcessed() > lastCharsProcessed) {
+    if (!gpsWorking) {
+      gpsWorking = true;
+      Serial.println("✅ GPS Module Working!");
+    }
+    lastCharsProcessed = gps.charsProcessed();
+    
+    if (gps.location.isValid()) {
+      Serial.println("🛰️ GPS SIGNAL ACQUIRED!");
+      Serial.print("📍 Location: ");
+      Serial.print(gps.location.lat(), 6);
+      Serial.print(", ");
+      Serial.print(gps.location.lng(), 6);
+      
+      if (gps.satellites.isValid()) {
+        Serial.print(" | 🛰️ Satellites: ");
+        Serial.print(gps.satellites.value());
+      }
+      
+      if (gps.speed.isValid()) {
+        Serial.print(" | 🚗 Speed: ");
+        Serial.print(gps.speed.kmph());
+        Serial.print(" km/h");
+      }
+      Serial.println();
+    }
+  }
   
-  Serial.println("\n2️⃣ Starting GY-521 Calibration...");
-  calibrateMPU6050();
-  
-  Serial.println("\n3️⃣ Starting Ultrasonic Calibration...");
-  calibrateUltrasonicSensors();
-  
-  Serial.println("\n🎉 ALL SENSORS CALIBRATED!");
-  Serial.println("💾 Don't forget to save calibration data (option 6)");
+  // Handle timeout
+  if (currentTime - lastGPSDataTime >= gpsDataTimeout && !gpsHardwareConnected) {
+    Serial.println("❌ GPS Timeout - Check connections!");
+    lastGPSDataTime = currentTime;
+  }
 }
 
-void readRawMPU6050(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz) {
-  // Read accelerometer
+void processSensorData() {
+  if (!sensorDetected) return;
+  
+  readSensorData();
+  checkRotation();
+  checkVibration();
+}
+
+void checkSensorConnection() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  byte error = Wire.endTransmission();
+  
+  if (error == 0) {
+    sensorDetected = true;
+    Serial.println("✅ GY-521 sensor detected!");
+  } else {
+    sensorDetected = false;
+    Serial.println("❌ GY-521 sensor NOT detected!");
+  }
+}
+
+void readSensorData() {
+  // Baca data akselerometer
   Wire.beginTransmission(MPU6050_ADDR);
   Wire.write(ACCEL_XOUT_H);
   Wire.endTransmission(false);
   Wire.requestFrom(MPU6050_ADDR, 6, true);
   
-  *ax = Wire.read() << 8 | Wire.read();
-  *ay = Wire.read() << 8 | Wire.read();
-  *az = Wire.read() << 8 | Wire.read();
+  accelX = Wire.read() << 8 | Wire.read();
+  accelY = Wire.read() << 8 | Wire.read();
+  accelZ = Wire.read() << 8 | Wire.read();
   
-  // Read gyroscope
+  // Hitung magnitudo akselerometer
+  accelMagnitude = sqrt((float)accelX * accelX + (float)accelY * accelY + (float)accelZ * accelZ);
+  
+  // Baca data gyroskop
   Wire.beginTransmission(MPU6050_ADDR);
   Wire.write(GYRO_XOUT_H);
   Wire.endTransmission(false);
   Wire.requestFrom(MPU6050_ADDR, 6, true);
   
-  *gx = Wire.read() << 8 | Wire.read();
-  *gy = Wire.read() << 8 | Wire.read();
-  *gz = Wire.read() << 8 | Wire.read();
+  gyroX = Wire.read() << 8 | Wire.read();
+  gyroY = Wire.read() << 8 | Wire.read();
+  gyroZ = Wire.read() << 8 | Wire.read();
+  
+  // Hitung magnitudo gyroskop (dalam deg/s)
+  float rotX = gyroX / 131.0;
+  float rotY = gyroY / 131.0;
+  float rotZ = gyroZ / 131.0;
+  rotationMagnitude = sqrt(rotX * rotX + rotY * rotY + rotZ * rotZ);
 }
 
-float readUltrasonicDistance(int sensorIndex) {
-  if (sensorIndex < 0 || sensorIndex >= 8) return -1;
+void checkRotation() {
+  float rotX = gyroX / 131.0;
+  float rotY = gyroY / 131.0;
+  float rotZ = gyroZ / 131.0;
   
-  digitalWrite(trigPins[sensorIndex], LOW);
+  if (abs(rotX) > rotationThreshold || abs(rotY) > rotationThreshold || abs(rotZ) > rotationThreshold) {
+    Serial.println("🔄 ROTATION DETECTED!");
+    Serial.print("Rotation - X: "); Serial.print(rotX); 
+    Serial.print(" | Y: "); Serial.print(rotY); 
+    Serial.print(" | Z: "); Serial.print(rotZ); Serial.println(" deg/s");
+  }
+}
+
+void checkVibration() {
+  accelMagnitude = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ);
+  float accelChange = abs(accelMagnitude - prevAccelMagnitude);
+  
+  if (accelChange > vibrationThreshold * 1000) {
+    Serial.println("📳 VIBRATION/SHOCK DETECTED!");
+    Serial.print("Acceleration change: "); Serial.println(accelChange);
+  }
+  
+  prevAccelMagnitude = accelMagnitude;
+}
+
+float readDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(trigPins[sensorIndex], HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trigPins[sensorIndex], LOW);
-  
-  long duration = pulseIn(echoPins[sensorIndex], HIGH, 30000);
-  if (duration == 0) return -1;
-  
-  return duration * 0.034 / 2;
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  float distance = duration * 0.034 / 2;
+  if (distance == 0 || distance > 400) return -1;
+  return distance;
 }
 
-void showCalibrationData() {
-  Serial.println("\n📊 ===== CURRENT CALIBRATION DATA =====");
+void readAllUltrasonicSensors() {
+  Serial.println("📏 Reading Ultrasonic Sensors:");
+  for (int i = 0; i < 8; i++) {
+    distances[i] = readDistance(trigPins[i], echoPins[i]);
+    Serial.print("Sensor ");
+    Serial.print(i + 1);
+    Serial.print(": ");
+    if (distances[i] == -1) {
+      Serial.println("Error/Out of range");
+    } else {
+      Serial.print(distances[i]);
+      Serial.println(" cm");
+    }
+  }
+}
+
+void sendAllSensorData() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ WiFi not connected, skipping data send");
+    return;
+  }
   
-  // MPU6050 Data
-  Serial.println("🔄 GY-521 (MPU6050):");
-  Serial.printf("   Status: %s\n", mpuCal.isCalibrated ? "✅ Calibrated" : "❌ Not Calibrated");
-  if (mpuCal.isCalibrated) {
-    Serial.printf("   Accel Offsets: X=%.2f, Y=%.2f, Z=%.2f\n", 
-                  mpuCal.accelOffsetX, mpuCal.accelOffsetY, mpuCal.accelOffsetZ);
-    Serial.printf("   Gyro Offsets: X=%.2f, Y=%.2f, Z=%.2f\n", 
-                  mpuCal.gyroOffsetX, mpuCal.gyroOffsetY, mpuCal.gyroOffsetZ);
-    Serial.printf("   Scales: Accel=%.1f LSB/g, Gyro=%.1f LSB/(°/s)\n", 
-                  mpuCal.accelScaleX, mpuCal.gyroScale);
+  // Create comprehensive JSON payload
+  String payload = createJsonPayload();
+  
+  // Send to Flask server (original)
+  sendToFlaskServer(payload);
+  
+  // Send to ThingsBoard with fallback logic
+  bool mqttSuccess = false;
+  bool httpSuccess = false;
+  
+  // Try MQTT first
+  if (mqttConnected) {
+    mqttSuccess = sendDataViaMqtt(payload);
+  }
+  
+  // If MQTT failed or not connected, use HTTP backup
+  if (!mqttSuccess) {
+    Serial.println("📡 Menggunakan HTTP backup...");
+    httpSuccess = sendDataViaHttp(payload);
+  }
+  
+  // Status reporting
+  if (mqttSuccess) {
+    Serial.println("📊 Status: MQTT ✅");
+  } else if (httpSuccess) {
+    Serial.println("📊 Status: HTTP Backup ✅");
+  } else {
+    Serial.println("📊 Status: Semua komunikasi gagal ❌");
+  }
+  
+  // Print communication statistics every 10 sends
+  static int sendCount = 0;
+  sendCount++;
+  if (sendCount % 10 == 0) {
+    printCommunicationStats();
+  }
+  
+  Serial.println("=================================");
+}
+
+String createJsonPayload() {
+  String payload = "{";
+  
+  // Add timestamp
+  payload += "\"timestamp\":" + String(millis()) + ",";
+  
+  // GPS Data
+  if (gps.location.isValid()) {
+    payload += "\"latitude\":" + String(gps.location.lat(), 6) + ",";
+    payload += "\"longitude\":" + String(gps.location.lng(), 6) + ",";
+  }
+  if (gps.speed.isValid()) {
+    payload += "\"speed\":" + String(gps.speed.kmph()) + ",";
+  }
+  if (gps.satellites.isValid()) {
+    payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
+  }
+  
+  // Motion Sensor Data - Kirim data olahan (magnitudo) ke ThingsBoard
+  if (sensorDetected) {
+    payload += "\"accelMagnitude\":" + String(accelMagnitude) + ",";
+    payload += "\"rotationMagnitude\":" + String(rotationMagnitude) + ",";
+    // Tetap kirim data raw untuk backup/debugging
+    payload += "\"accelX\":" + String(accelX) + ",";
+    payload += "\"accelY\":" + String(accelY) + ",";
+    payload += "\"accelZ\":" + String(accelZ) + ",";
+    payload += "\"gyroX\":" + String(gyroX) + ",";
+    payload += "\"gyroY\":" + String(gyroY) + ",";
+    payload += "\"gyroZ\":" + String(gyroZ) + ",";
   }
   
   // Ultrasonic Data
-  Serial.println("\n📏 Ultrasonic Sensors:");
-  Serial.printf("   Status: %s\n", ultraCal.isCalibrated ? "✅ Calibrated" : "❌ Not Calibrated");
-  if (ultraCal.isCalibrated) {
-    for (int i = 0; i < 8; i++) {
-      Serial.printf("   Sensor %d: Scale=%.3f, Offset=%.2f\n", 
-                    i+1, ultraCal.scaleFactor[i], ultraCal.offset[i]);
-    }
-  }
-  
-  Serial.println("=====================================");
-}
-
-void saveCalibrationToEEPROM() {
-  Serial.println("\n💾 Saving calibration to EEPROM...");
-  
-  // Save MPU6050 calibration
-  EEPROM.put(MPU_CAL_ADDR, mpuCal);
-  
-  // Save Ultrasonic calibration
-  EEPROM.put(ULTRA_CAL_ADDR, ultraCal);
-  
-  EEPROM.commit();
-  
-  Serial.println("✅ Calibration data saved to EEPROM!");
-}
-
-void loadCalibrationFromEEPROM() {
-  Serial.println("\n📂 Loading calibration from EEPROM...");
-  
-  // Load MPU6050 calibration
-  EEPROM.get(MPU_CAL_ADDR, mpuCal);
-  
-  // Load Ultrasonic calibration
-  EEPROM.get(ULTRA_CAL_ADDR, ultraCal);
-  
-  Serial.println("✅ Calibration data loaded from EEPROM!");
-  showCalibrationData();
-}
-
-void resetAllCalibration() {
-  Serial.println("\n🔄 Resetting all calibration data...");
-  
-  // Reset MPU6050
-  mpuCal.accelOffsetX = 0;
-  mpuCal.accelOffsetY = 0;
-  mpuCal.accelOffsetZ = 0;
-  mpuCal.gyroOffsetX = 0;
-  mpuCal.gyroOffsetY = 0;
-  mpuCal.gyroOffsetZ = 0;
-  mpuCal.accelScaleX = 16384.0;
-  mpuCal.accelScaleY = 16384.0;
-  mpuCal.accelScaleZ = 16384.0;
-  mpuCal.gyroScale = 131.0;
-  mpuCal.isCalibrated = false;
-  
-  // Reset Ultrasonic
   for (int i = 0; i < 8; i++) {
-    ultraCal.scaleFactor[i] = 1.0;
-    ultraCal.offset[i] = 0;
-    ultraCal.maxDistance[i] = 400;
+    payload += "\"sensor" + String(i + 1) + "\":" + String(distances[i]);
+    if (i < 7) payload += ",";
   }
-  ultraCal.isCalibrated = false;
   
-  Serial.println("✅ All calibration data reset!");
+  payload += "}";
+  return payload;
 }
 
-void testCalibratedValues() {
-  Serial.println("\n🧪 ===== TESTING CALIBRATED VALUES =====");
-  Serial.println("📊 Press any key to stop test...");
+void sendToFlaskServer(String payload) {
+  // Buat payload terpisah untuk Flask (data mentah)
+  String flaskPayload = "{";
   
-  unsigned long lastPrint = 0;
-  
-  while (!Serial.available()) {
-    if (millis() - lastPrint > 1000) {
-      lastPrint = millis();
-      
-      // Test MPU6050
-      if (mpuCal.isCalibrated) {
-        int16_t ax, ay, az, gx, gy, gz;
-        readRawMPU6050(&ax, &ay, &az, &gx, &gy, &gz);
-        
-        // Apply calibration
-        float accelX_g = (ax - mpuCal.accelOffsetX) / mpuCal.accelScaleX;
-        float accelY_g = (ay - mpuCal.accelOffsetY) / mpuCal.accelScaleY;
-        float accelZ_g = (az - mpuCal.accelOffsetZ) / mpuCal.accelScaleZ;
-        
-        float gyroX_dps = (gx - mpuCal.gyroOffsetX) / mpuCal.gyroScale;
-        float gyroY_dps = (gy - mpuCal.gyroOffsetY) / mpuCal.gyroScale;
-        float gyroZ_dps = (gz - mpuCal.gyroOffsetZ) / mpuCal.gyroScale;
-        
-        Serial.println("🔄 GY-521 Calibrated Values:");
-        Serial.printf("   Accel: X=%.3fg, Y=%.3fg, Z=%.3fg\n", accelX_g, accelY_g, accelZ_g);
-        Serial.printf("   Gyro: X=%.2f°/s, Y=%.2f°/s, Z=%.2f°/s\n", gyroX_dps, gyroY_dps, gyroZ_dps);
-      }
-      
-      // Test Ultrasonic
-      if (ultraCal.isCalibrated) {
-        Serial.println("📏 Ultrasonic Calibrated Values:");
-        for (int i = 0; i < 8; i++) {
-          float rawDistance = readUltrasonicDistance(i);
-          float calibratedDistance = (rawDistance * ultraCal.scaleFactor[i]) + ultraCal.offset[i];
-          Serial.printf("   S%d: %.1f cm (raw: %.1f)\n", i+1, calibratedDistance, rawDistance);
-        }
-      }
-      
-      Serial.println("---");
-    }
-    delay(100);
+  // GPS Data untuk Flask
+  if (gps.location.isValid()) {
+    flaskPayload += "\"latitude\":" + String(gps.location.lat(), 6) + ",";
+    flaskPayload += "\"longitude\":" + String(gps.location.lng(), 6) + ",";
+  }
+  if (gps.speed.isValid()) {
+    flaskPayload += "\"speed\":" + String(gps.speed.kmph()) + ",";
+  }
+  if (gps.satellites.isValid()) {
+    flaskPayload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
-  // Clear serial buffer
-  while (Serial.available()) Serial.read();
-  Serial.println("🛑 Test stopped.");
+  // Data raw sensor untuk Flask
+  if (sensorDetected) {
+    flaskPayload += "\"accelX\":" + String(accelX) + ",";
+    flaskPayload += "\"accelY\":" + String(accelY) + ",";
+    flaskPayload += "\"accelZ\":" + String(accelZ) + ",";
+    flaskPayload += "\"gyroX\":" + String(gyroX) + ",";
+    flaskPayload += "\"gyroY\":" + String(gyroY) + ",";
+    flaskPayload += "\"gyroZ\":" + String(gyroZ) + ",";
+  }
+  
+  // Ultrasonic data untuk Flask
+  for (int i = 0; i < 8; i++) {
+    flaskPayload += "\"sensor" + String(i + 1) + "\":" + String(distances[i]);
+    if (i < 7) flaskPayload += ",";
+  }
+  flaskPayload += "}";
+  
+  HTTPClient http;
+  http.begin("http://192.168.43.18:5000/multisensor");
+  http.addHeader("Content-Type", "application/json");
+  int httpResponseCode = http.POST(flaskPayload);
+  Serial.print("📡 Flask response: ");
+  Serial.println(httpResponseCode);
+  http.end();
+}
+
+void printCommunicationStats() {
+  Serial.println("\n📊 === COMMUNICATION STATISTICS ===");
+  Serial.print("MQTT Status: ");
+  Serial.println(mqttConnected ? "✅ Connected" : "❌ Disconnected");
+  Serial.print("MQTT Fail Count: ");
+  Serial.println(mqttFailCount);
+  Serial.print("HTTP Success Count: ");
+  Serial.println(httpSuccessCount);
+  Serial.print("HTTP Fail Count: ");
+  Serial.println(httpFailCount);
+  Serial.print("WiFi Status: ");
+  Serial.println(WiFi.status() == WL_CONNECTED ? "✅ Connected" : "❌ Disconnected");
+  Serial.print("Free Heap: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+  Serial.println("=====================================\n");
 }
