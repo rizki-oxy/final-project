@@ -12,8 +12,8 @@ const int mqtt_port = 1883;
 const char* access_token = "0939gxC3IXo3uoCIgAED";
 
 // ThingsBoard HTTP Configuration
-const char* thingsboard_server = "192.168.43.18";  // ThingsBoard demo server
-const int thingsboard_port = 8081;  // Default ThingsBoard port
+const char* thingsboard_server = "192.168.43.18";
+const int thingsboard_port = 8081;
 const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
 
 WiFiClient espClient;
@@ -22,14 +22,14 @@ PubSubClient client(espClient);
 // Communication status tracking
 bool mqttConnected = false;
 unsigned long lastMqttAttempt = 0;
-const unsigned long mqttRetryInterval = 5000;  // Retry MQTT every 5 seconds
+const unsigned long mqttRetryInterval = 5000;
 unsigned long mqttFailCount = 0;
 unsigned long httpSuccessCount = 0;
 unsigned long httpFailCount = 0;
 
 // GPS Configuration
-#define GPS_RX_PIN 16  // ESP32 menerima data dari GPS
-#define GPS_TX_PIN 17  // ESP32 mengirim data ke GPS
+#define GPS_RX_PIN 16
+#define GPS_TX_PIN 17
 #define GPS_BAUD 9600
 
 // MPU6050 Configuration
@@ -38,13 +38,18 @@ unsigned long httpFailCount = 0;
 #define ACCEL_XOUT_H 0x3B
 #define GYRO_XOUT_H 0x43
 
-// ESP32 I2C Pins (Reserved for GY-521)
+// Conversion constants untuk MPU6050
+const float ACCEL_SCALE_16G = 2048.0;    // LSB/g untuk ±16g range
+const float GYRO_SCALE_250DPS = 131.0;   // LSB/(deg/s) untuk ±250 deg/s range
+const float GRAVITY_MS2 = 9.81;          // m/s² conversion factor
+
+// ESP32 I2C Pins
 #define SDA_PIN 21
 #define SCL_PIN 22
 
 // Ultrasonic Sensor Pins
-int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};      // Trigger pins
-int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};   // Echo pins
+int trigPins[8] = {5, 4, 15, 2, 13, 12, 14, 27};
+int echoPins[8] = {18, 19, 23, 25, 26, 33, 32, 35};
 
 // GPS Objects
 TinyGPSPlus gps;
@@ -52,7 +57,7 @@ HardwareSerial GPSSerial(2);
 
 // GPS Variables
 unsigned long lastGPSCheckTime = 0;
-const unsigned long gpsCheckInterval = 3000;  // Check GPS every 3 seconds
+const unsigned long gpsCheckInterval = 3000;
 unsigned long lastGPSDataTime = 0;
 const unsigned long gpsDataTimeout = 5000;
 bool gpsHardwareConnected = false;
@@ -60,35 +65,59 @@ bool gpsWorking = false;
 unsigned long lastCharsProcessed = 0;
 unsigned long rawGPSDataCount = 0;
 
-// MPU6050 Variables
+// MPU6050 Variables - RAW DATA
 int16_t accelX, accelY, accelZ;
 int16_t gyroX, gyroY, gyroZ;
-float accelMagnitude = 0;        // tambahan untuk magnitudo getaran
-float rotationMagnitude = 0;     // tambahan untuk magnitudo rotasi
-float prevAccelMagnitude = 0;
-float vibrationThreshold = 2.0;
-float rotationThreshold = 500;
+
+// MPU6050 Variables - CONVERTED DATA
+float accelX_g, accelY_g, accelZ_g;           // dalam g
+float accelX_ms2, accelY_ms2, accelZ_ms2;     // dalam m/s²
+float accelMagnitude_g = 0;                   // magnitude dalam g
+float accelMagnitude_ms2 = 0;                 // magnitude dalam m/s²
+
+float gyroX_dps, gyroY_dps, gyroZ_dps;        // dalam deg/s
+float rotationMagnitude_dps = 0;              // magnitude dalam deg/s
+
+// VARIABEL BARU UNTUK DETEKSI GETARAN
+float prevAccelMagnitude_ms2 = 0;
+float vibrationMagnitude_ms2 = 0;             // NILAI GETARAN UNTUK WIDGET
+float vibrationThreshold_ms2 = 2.0;           // threshold dalam m/s²
+float rotationThreshold_dps = 500;            // threshold dalam deg/s
+
+// Buffer untuk smoothing getaran (moving average)
+const int VIBRATION_BUFFER_SIZE = 5;
+float vibrationBuffer[VIBRATION_BUFFER_SIZE];
+int vibrationBufferIndex = 0;
+bool vibrationBufferFull = false;
+
 bool sensorDetected = false;
 unsigned long lastSensorCheckTime = 0;
-const unsigned long sensorCheckInterval = 1000;  // Check sensor every 1 second
+const unsigned long sensorCheckInterval = 1000;
 
 // Ultrasonic Variables
 unsigned long lastUltrasonicTime = 0;
-const unsigned long ultrasonicInterval = 1000;  // Read ultrasonic every 1 second
+const unsigned long ultrasonicInterval = 1000;
 float distances[8];
 
 // System Variables
 unsigned long lastDataSendTime = 0;
-const unsigned long dataSendInterval = 2000;  // Send data every 2 seconds
+const unsigned long dataSendInterval = 2000;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== ESP32 Multi-Sensor System ===");
+  Serial.println("\n=== ESP32 Multi-Sensor System (Vibration Detection) ===");
   Serial.println("GPS + GY-521 + Ultrasonic Array");
   Serial.println("MQTT + HTTP Backup Communication");
-  Serial.println("=================================");
+  Serial.println("GY-521: Raw data + Converted to m/s² and deg/s");
+  Serial.println("NEW: Vibration Magnitude Detection for Widget");
+  Serial.println("=======================================================");
+  
+  // Initialize vibration buffer
+  for (int i = 0; i < VIBRATION_BUFFER_SIZE; i++) {
+    vibrationBuffer[i] = 0.0;
+  }
   
   // Initialize WiFi
   setup_wifi();
@@ -117,6 +146,9 @@ void setup() {
     Wire.write(0);
     Wire.endTransmission(true);
     Serial.println("✅ GY-521 sensor initialized!");
+    Serial.println("📊 Conversion: ±16g range, ±250°/s range");
+    Serial.println("📊 Output: Raw LSB + m/s² + deg/s");
+    Serial.println("📳 Vibration detection enabled for widget");
   }
   
   // Initialize Ultrasonic sensors
@@ -129,6 +161,8 @@ void setup() {
   
   Serial.println("\n--- MULTI-SENSOR MONITORING STARTED ---");
   Serial.println("📡 Communication: MQTT Primary + HTTP Backup");
+  Serial.println("🔄 GY-521: LSB → g → m/s² conversion enabled");
+  Serial.println("📳 Vibration: Real-time magnitude calculation");
   Serial.println();
 }
 
@@ -192,7 +226,6 @@ void handleMqttConnection() {
     mqttConnected = false;
     unsigned long currentTime = millis();
     
-    // Only try to reconnect after retry interval
     if (currentTime - lastMqttAttempt >= mqttRetryInterval) {
       Serial.print("🔄 Mencoba koneksi MQTT...");
       if (client.connect("ESP32MultiSensor", access_token, NULL)) {
@@ -217,52 +250,120 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Handle MQTT messages if needed
 }
 
-bool sendDataViaMqtt(String payload) {
-  if (!mqttConnected || !client.connected()) {
-    return false;
-  }
+void processSensorData() {
+  if (!sensorDetected) return;
   
-  bool success = client.publish("v1/devices/me/telemetry", payload.c_str());
-  if (success) {
-    Serial.println("✅ MQTT: Data terkirim");
-  } else {
-    Serial.println("❌ MQTT: Gagal kirim data");
-    mqttConnected = false;
-  }
-  return success;
+  readSensorData();
+  convertSensorData();
+  calculateVibrationMagnitude();  // FUNGSI BARU UNTUK GETARAN
+  checkVibration();
+  checkRotation();
 }
 
-bool sendDataViaHttp(String payload) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ HTTP: WiFi tidak terhubung");
-    return false;
-  }
+void checkSensorConnection() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  byte error = Wire.endTransmission();
   
-  HTTPClient http;
-  http.begin(thingsboard_url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(5000);  // 5 second timeout
-  
-  int httpResponseCode = http.POST(payload);
-  
-  if (httpResponseCode > 0) {
-    if (httpResponseCode == 200) {
-      Serial.println("✅ HTTP: Data terkirim ke ThingsBoard");
-      httpSuccessCount++;
-      http.end();
-      return true;
-    } else {
-      Serial.print("⚠️ HTTP: Response code ");
-      Serial.println(httpResponseCode);
-    }
+  if (error == 0) {
+    sensorDetected = true;
+    Serial.println("✅ GY-521 sensor detected!");
   } else {
-    Serial.print("❌ HTTP: Error ");
-    Serial.println(http.errorToString(httpResponseCode));
+    sensorDetected = false;
+    Serial.println("❌ GY-521 sensor NOT detected!");
+  }
+}
+
+void readSensorData() {
+  // Baca data akselerometer (RAW)
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(ACCEL_XOUT_H);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU6050_ADDR, 6, true);
+  
+  accelX = Wire.read() << 8 | Wire.read();
+  accelY = Wire.read() << 8 | Wire.read();
+  accelZ = Wire.read() << 8 | Wire.read();
+  
+  // Baca data gyroskop (RAW)
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(GYRO_XOUT_H);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU6050_ADDR, 6, true);
+  
+  gyroX = Wire.read() << 8 | Wire.read();
+  gyroY = Wire.read() << 8 | Wire.read();
+  gyroZ = Wire.read() << 8 | Wire.read();
+}
+
+void convertSensorData() {
+  // Konversi Accelerometer: LSB → g → m/s²
+  accelX_g = (float)accelX / ACCEL_SCALE_16G;
+  accelY_g = (float)accelY / ACCEL_SCALE_16G;
+  accelZ_g = (float)accelZ / ACCEL_SCALE_16G;
+  
+  accelX_ms2 = accelX_g * GRAVITY_MS2;
+  accelY_ms2 = accelY_g * GRAVITY_MS2;
+  accelZ_ms2 = accelZ_g * GRAVITY_MS2;
+  
+  // Hitung magnitudo accelerometer
+  accelMagnitude_g = sqrt(accelX_g * accelX_g + accelY_g * accelY_g + accelZ_g * accelZ_g);
+  accelMagnitude_ms2 = sqrt(accelX_ms2 * accelX_ms2 + accelY_ms2 * accelY_ms2 + accelZ_ms2 * accelZ_ms2);
+  
+  // Konversi Gyroscope: LSB → deg/s
+  gyroX_dps = (float)gyroX / GYRO_SCALE_250DPS;
+  gyroY_dps = (float)gyroY / GYRO_SCALE_250DPS;
+  gyroZ_dps = (float)gyroZ / GYRO_SCALE_250DPS;
+  
+  // Hitung magnitudo rotasi
+  rotationMagnitude_dps = sqrt(gyroX_dps * gyroX_dps + gyroY_dps * gyroY_dps + gyroZ_dps * gyroZ_dps);
+}
+
+// FUNGSI BARU: Hitung magnitude getaran untuk widget
+void calculateVibrationMagnitude() {
+  // Hitung perubahan accelerometer magnitude
+  float rawVibration = abs(accelMagnitude_ms2 - prevAccelMagnitude_ms2);
+  
+  // Masukkan ke buffer untuk smoothing
+  vibrationBuffer[vibrationBufferIndex] = rawVibration;
+  vibrationBufferIndex = (vibrationBufferIndex + 1) % VIBRATION_BUFFER_SIZE;
+  
+  if (vibrationBufferIndex == 0) {
+    vibrationBufferFull = true;
   }
   
-  httpFailCount++;
-  http.end();
-  return false;
+  // Hitung moving average untuk smoothing
+  float sum = 0;
+  int count = vibrationBufferFull ? VIBRATION_BUFFER_SIZE : vibrationBufferIndex;
+  
+  for (int i = 0; i < count; i++) {
+    sum += vibrationBuffer[i];
+  }
+  
+  vibrationMagnitude_ms2 = sum / count;
+  
+  // Update previous magnitude
+  prevAccelMagnitude_ms2 = accelMagnitude_ms2;
+}
+
+void checkVibration() {
+  if (vibrationMagnitude_ms2 > vibrationThreshold_ms2) {
+    Serial.println("📳 VIBRATION/SHOCK DETECTED!");
+    Serial.print("Vibration magnitude: "); 
+    Serial.print(vibrationMagnitude_ms2); 
+    Serial.println(" m/s²");
+  }
+}
+
+void checkRotation() {
+  if (abs(gyroX_dps) > rotationThreshold_dps || 
+      abs(gyroY_dps) > rotationThreshold_dps || 
+      abs(gyroZ_dps) > rotationThreshold_dps) {
+    Serial.println("🔄 ROTATION DETECTED!");
+    Serial.print("Rotation - X: "); Serial.print(gyroX_dps); 
+    Serial.print(" | Y: "); Serial.print(gyroY_dps); 
+    Serial.print(" | Z: "); Serial.print(gyroZ_dps); 
+    Serial.println(" deg/s");
+  }
 }
 
 void processGPSData(unsigned long currentTime) {
@@ -317,83 +418,6 @@ void checkGPSStatus(unsigned long currentTime) {
   }
 }
 
-void processSensorData() {
-  if (!sensorDetected) return;
-  
-  readSensorData();
-  checkRotation();
-  checkVibration();
-}
-
-void checkSensorConnection() {
-  Wire.beginTransmission(MPU6050_ADDR);
-  byte error = Wire.endTransmission();
-  
-  if (error == 0) {
-    sensorDetected = true;
-    Serial.println("✅ GY-521 sensor detected!");
-  } else {
-    sensorDetected = false;
-    Serial.println("❌ GY-521 sensor NOT detected!");
-  }
-}
-
-void readSensorData() {
-  // Baca data akselerometer
-  Wire.beginTransmission(MPU6050_ADDR);
-  Wire.write(ACCEL_XOUT_H);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU6050_ADDR, 6, true);
-  
-  accelX = Wire.read() << 8 | Wire.read();
-  accelY = Wire.read() << 8 | Wire.read();
-  accelZ = Wire.read() << 8 | Wire.read();
-  
-  // Hitung magnitudo akselerometer
-  accelMagnitude = sqrt((float)accelX * accelX + (float)accelY * accelY + (float)accelZ * accelZ);
-  
-  // Baca data gyroskop
-  Wire.beginTransmission(MPU6050_ADDR);
-  Wire.write(GYRO_XOUT_H);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU6050_ADDR, 6, true);
-  
-  gyroX = Wire.read() << 8 | Wire.read();
-  gyroY = Wire.read() << 8 | Wire.read();
-  gyroZ = Wire.read() << 8 | Wire.read();
-  
-  // Hitung magnitudo gyroskop (dalam deg/s)
-  float rotX = gyroX / 131.0;
-  float rotY = gyroY / 131.0;
-  float rotZ = gyroZ / 131.0;
-  rotationMagnitude = sqrt(rotX * rotX + rotY * rotY + rotZ * rotZ);
-}
-
-void checkRotation() {
-  float rotX = gyroX / 131.0;
-  float rotY = gyroY / 131.0;
-  float rotZ = gyroZ / 131.0;
-  
-  if (abs(rotX) > rotationThreshold || abs(rotY) > rotationThreshold || abs(rotZ) > rotationThreshold) {
-    Serial.println("🔄 ROTATION DETECTED!");
-    Serial.print("Rotation - X: "); Serial.print(rotX); 
-    Serial.print(" | Y: "); Serial.print(rotY); 
-    Serial.print(" | Z: "); Serial.print(rotZ); Serial.println(" deg/s");
-  }
-}
-
-void checkVibration() {
-  accelMagnitude = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ);
-  float accelChange = abs(accelMagnitude - prevAccelMagnitude);
-  
-  if (accelChange > vibrationThreshold * 1000) {
-    Serial.println("📳 VIBRATION/SHOCK DETECTED!");
-    Serial.print("Acceleration change: "); Serial.println(accelChange);
-  }
-  
-  prevAccelMagnitude = accelMagnitude;
-}
-
 float readDistance(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -429,11 +453,14 @@ void sendAllSensorData() {
     return;
   }
   
-  // Create comprehensive JSON payload
-  String payload = createJsonPayload();
+  // Create comprehensive JSON payload untuk ThingsBoard
+  String tbPayload = createThingsBoardPayload();
   
-  // Send to Flask server (original)
-  sendToFlaskServer(payload);
+  // Create payload untuk Flask (data mentah + konversi)
+  String flaskPayload = createFlaskPayload();
+  
+  // Send to Flask server
+  sendToFlaskServer(flaskPayload);
   
   // Send to ThingsBoard with fallback logic
   bool mqttSuccess = false;
@@ -441,13 +468,13 @@ void sendAllSensorData() {
   
   // Try MQTT first
   if (mqttConnected) {
-    mqttSuccess = sendDataViaMqtt(payload);
+    mqttSuccess = sendDataViaMqtt(tbPayload);
   }
   
   // If MQTT failed or not connected, use HTTP backup
   if (!mqttSuccess) {
     Serial.println("📡 Menggunakan HTTP backup...");
-    httpSuccess = sendDataViaHttp(payload);
+    httpSuccess = sendDataViaHttp(tbPayload);
   }
   
   // Status reporting
@@ -469,7 +496,7 @@ void sendAllSensorData() {
   Serial.println("=================================");
 }
 
-String createJsonPayload() {
+String createThingsBoardPayload() {
   String payload = "{";
   
   // Add timestamp
@@ -487,17 +514,22 @@ String createJsonPayload() {
     payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
-  // Motion Sensor Data - Kirim data olahan (magnitudo) ke ThingsBoard
+  // Motion Sensor Data - TERMASUK VIBRATION MAGNITUDE UNTUK WIDGET
   if (sensorDetected) {
-    payload += "\"accelMagnitude\":" + String(accelMagnitude) + ",";
-    payload += "\"rotationMagnitude\":" + String(rotationMagnitude) + ",";
-    // Tetap kirim data raw untuk backup/debugging
-    payload += "\"accelX\":" + String(accelX) + ",";
-    payload += "\"accelY\":" + String(accelY) + ",";
-    payload += "\"accelZ\":" + String(accelZ) + ",";
-    payload += "\"gyroX\":" + String(gyroX) + ",";
-    payload += "\"gyroY\":" + String(gyroY) + ",";
-    payload += "\"gyroZ\":" + String(gyroZ) + ",";
+    // NILAI GETARAN UTAMA UNTUK WIDGET GAUGE
+    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_ms2, 2) + ",";
+    
+    // Converted accelerometer data (m/s²)
+    payload += "\"accel_magnitude_ms2\":" + String(accelMagnitude_ms2, 2) + ",";
+    payload += "\"accel_x_ms2\":" + String(accelX_ms2, 2) + ",";
+    payload += "\"accel_y_ms2\":" + String(accelY_ms2, 2) + ",";
+    payload += "\"accel_z_ms2\":" + String(accelZ_ms2, 2) + ",";
+    
+    // Converted gyroscope data (deg/s) - masih kirim untuk monitoring
+    payload += "\"rotation_magnitude_dps\":" + String(rotationMagnitude_dps, 2) + ",";
+    payload += "\"gyro_x_dps\":" + String(gyroX_dps, 2) + ",";
+    payload += "\"gyro_y_dps\":" + String(gyroY_dps, 2) + ",";
+    payload += "\"gyro_z_dps\":" + String(gyroZ_dps, 2) + ",";
   }
   
   // Ultrasonic Data
@@ -510,43 +542,108 @@ String createJsonPayload() {
   return payload;
 }
 
-void sendToFlaskServer(String payload) {
-  // Buat payload terpisah untuk Flask (data mentah)
-  String flaskPayload = "{";
+String createFlaskPayload() {
+  String payload = "{";
   
   // GPS Data untuk Flask
   if (gps.location.isValid()) {
-    flaskPayload += "\"latitude\":" + String(gps.location.lat(), 6) + ",";
-    flaskPayload += "\"longitude\":" + String(gps.location.lng(), 6) + ",";
+    payload += "\"latitude\":" + String(gps.location.lat(), 6) + ",";
+    payload += "\"longitude\":" + String(gps.location.lng(), 6) + ",";
   }
   if (gps.speed.isValid()) {
-    flaskPayload += "\"speed\":" + String(gps.speed.kmph()) + ",";
+    payload += "\"speed\":" + String(gps.speed.kmph()) + ",";
   }
   if (gps.satellites.isValid()) {
-    flaskPayload += "\"satellites\":" + String(gps.satellites.value()) + ",";
+    payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
-  // Data raw sensor untuk Flask
+  // Data GY-521 untuk Flask (RAW + CONVERTED + VIBRATION)
   if (sensorDetected) {
-    flaskPayload += "\"accelX\":" + String(accelX) + ",";
-    flaskPayload += "\"accelY\":" + String(accelY) + ",";
-    flaskPayload += "\"accelZ\":" + String(accelZ) + ",";
-    flaskPayload += "\"gyroX\":" + String(gyroX) + ",";
-    flaskPayload += "\"gyroY\":" + String(gyroY) + ",";
-    flaskPayload += "\"gyroZ\":" + String(gyroZ) + ",";
+    // Raw data (untuk backup/debugging)
+    payload += "\"accelX\":" + String(accelX) + ",";
+    payload += "\"accelY\":" + String(accelY) + ",";
+    payload += "\"accelZ\":" + String(accelZ) + ",";
+    payload += "\"gyroX\":" + String(gyroX) + ",";
+    payload += "\"gyroY\":" + String(gyroY) + ",";
+    payload += "\"gyroZ\":" + String(gyroZ) + ",";
+    
+    // Converted data (untuk analisis)
+    payload += "\"accelX_ms2\":" + String(accelX_ms2, 2) + ",";
+    payload += "\"accelY_ms2\":" + String(accelY_ms2, 2) + ",";
+    payload += "\"accelZ_ms2\":" + String(accelZ_ms2, 2) + ",";
+    payload += "\"accel_magnitude_ms2\":" + String(accelMagnitude_ms2, 2) + ",";
+    payload += "\"gyroX_dps\":" + String(gyroX_dps, 2) + ",";
+    payload += "\"gyroY_dps\":" + String(gyroY_dps, 2) + ",";
+    payload += "\"gyroZ_dps\":" + String(gyroZ_dps, 2) + ",";
+    payload += "\"rotation_magnitude_dps\":" + String(rotationMagnitude_dps, 2) + ",";
+    
+    // VIBRATION MAGNITUDE untuk Flask juga
+    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_ms2, 2) + ",";
   }
   
   // Ultrasonic data untuk Flask
   for (int i = 0; i < 8; i++) {
-    flaskPayload += "\"sensor" + String(i + 1) + "\":" + String(distances[i]);
-    if (i < 7) flaskPayload += ",";
+    payload += "\"sensor" + String(i + 1) + "\":" + String(distances[i]);
+    if (i < 7) payload += ",";
   }
-  flaskPayload += "}";
+  payload += "}";
   
+  return payload;
+}
+
+bool sendDataViaMqtt(String payload) {
+  if (!mqttConnected || !client.connected()) {
+    return false;
+  }
+  
+  bool success = client.publish("v1/devices/me/telemetry", payload.c_str());
+  if (success) {
+    Serial.println("✅ MQTT: Data terkirim");
+  } else {
+    Serial.println("❌ MQTT: Gagal kirim data");
+    mqttConnected = false;
+  }
+  return success;
+}
+
+bool sendDataViaHttp(String payload) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ HTTP: WiFi tidak terhubung");
+    return false;
+  }
+  
+  HTTPClient http;
+  http.begin(thingsboard_url);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
+  
+  int httpResponseCode = http.POST(payload);
+  
+  if (httpResponseCode > 0) {
+    if (httpResponseCode == 200) {
+      Serial.println("✅ HTTP: Data terkirim ke ThingsBoard");
+      httpSuccessCount++;
+      http.end();
+      return true;
+    } else {
+      Serial.print("⚠️ HTTP: Response code ");
+      Serial.println(httpResponseCode);
+    }
+  } else {
+    Serial.print("❌ HTTP: Error ");
+    Serial.println(http.errorToString(httpResponseCode));
+  }
+  
+  httpFailCount++;
+  http.end();
+  return false;
+}
+
+void sendToFlaskServer(String payload) {
   HTTPClient http;
   http.begin("http://192.168.43.18:5000/multisensor");
   http.addHeader("Content-Type", "application/json");
-  int httpResponseCode = http.POST(flaskPayload);
+  int httpResponseCode = http.POST(payload);
   Serial.print("📡 Flask response: ");
   Serial.println(httpResponseCode);
   http.end();
@@ -567,5 +664,20 @@ void printCommunicationStats() {
   Serial.print("Free Heap: ");
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
+  
+  // Print conversion info + VIBRATION INFO
+  if (sensorDetected) {
+    Serial.println("🔄 === GY-521 CONVERSION STATUS ===");
+    Serial.print("Accel Magnitude: ");
+    Serial.print(accelMagnitude_ms2);
+    Serial.println(" m/s²");
+    Serial.print("Vibration Magnitude: ");  // TAMBAHAN BARU
+    Serial.print(vibrationMagnitude_ms2);
+    Serial.print(" m/s² (Widget Value)");
+    Serial.println();
+    Serial.print("Rotation Magnitude: ");
+    Serial.print(rotationMagnitude_dps);
+    Serial.println(" deg/s");
+  }
   Serial.println("=====================================\n");
 }
