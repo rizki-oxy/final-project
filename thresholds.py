@@ -7,9 +7,9 @@
 
 # Ultrasonic Sensor Thresholds
 SURFACE_CHANGE_THRESHOLDS = {
-    'minor': 1.5,      # cm - perubahan kecil
-    'moderate': 3.0,   # cm - perubahan sedang
-    'major': 5.0      # cm - perubahan besar
+    'minor': 2.5,      # cm - perubahan kecil
+    'moderate': 5.0,   # cm - perubahan sedang
+    'major': 7.0      # cm - perubahan besar
 }
 
 # GY-521 Accelerometer Thresholds (UPDATED untuk m/s²)
@@ -52,15 +52,15 @@ VEHICLE_VIBRATION_FILTER = {
 # UPDATED: Vibration threshold dalam m/s² (setelah difilter)
 DAMAGE_CLASSIFICATION_AND = {
     'rusak_berat': {
-        'surface_change': 5.0,   # >= 10 cm
+        'surface_change': 7.0,   # >= 10 cm
         'vibration': 40.0,        # >= 10.0 m/s² (filtered)
     },
     'rusak_sedang': {
-        'surface_change': 3.0,    # >= 5 cm
+        'surface_change': 5.0,    # >= 5 cm
         'vibration': 30.0,         # >= 5.0 m/s² (filtered)
     },
     'rusak_ringan': {
-        'surface_change': 1.5,    # >= 2 cm
+        'surface_change': 2.5,    # >= 2 cm
         'vibration': 25.0,         # >= 2.0 m/s² (filtered)
     }
 }
