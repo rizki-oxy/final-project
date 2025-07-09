@@ -78,13 +78,20 @@ float accelMagnitude_ms2 = 0;                 // magnitude dalam m/s²
 float gyroX_dps, gyroY_dps, gyroZ_dps;        // dalam deg/s
 float rotationMagnitude_dps = 0;              // magnitude dalam deg/s
 
-// VARIABEL BARU UNTUK DETEKSI GETARAN
+// VARIABEL BARU UNTUK DETEKSI SHOCK & VIBRATION
 float prevAccelMagnitude_ms2 = 0;
-float vibrationMagnitude_ms2 = 0;             // NILAI GETARAN UNTUK WIDGET
-float vibrationThreshold_ms2 = 2.0;           // threshold dalam m/s²
-float rotationThreshold_dps = 500;            // threshold dalam deg/s
+float shockMagnitude_ms2 = 0;                 // SHOCK dari accelerometer
+float vibrationMagnitude_dps = 0;             // VIBRATION dari gyroscope
+float shockThreshold_ms2 = 25.0;              // threshold shock dalam m/s²
+float vibrationThreshold_dps = 100.0;         // threshold vibration dalam deg/s
 
-// Buffer untuk smoothing getaran (moving average)
+// Buffer untuk smoothing shock (moving average)
+const int SHOCK_BUFFER_SIZE = 5;
+float shockBuffer[SHOCK_BUFFER_SIZE];
+int shockBufferIndex = 0;
+bool shockBufferFull = false;
+
+// Buffer untuk smoothing vibration (moving average)
 const int VIBRATION_BUFFER_SIZE = 5;
 float vibrationBuffer[VIBRATION_BUFFER_SIZE];
 int vibrationBufferIndex = 0;
@@ -107,12 +114,17 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n=== ESP32 Multi-Sensor System (Vibration Detection) ===");
+  Serial.println("\n=== ESP32 Multi-Sensor System (Shock & Vibration Detection) ===");
   Serial.println("GPS + GY-521 + Ultrasonic Array");
   Serial.println("MQTT + HTTP Backup Communication");
   Serial.println("GY-521: Raw data + Converted to m/s² and deg/s");
-  Serial.println("NEW: Vibration Magnitude Detection for Widget");
-  Serial.println("=======================================================");
+  Serial.println("NEW: Shock (accelerometer) + Vibration (gyroscope) Detection");
+  Serial.println("================================================================");
+  
+  // Initialize shock buffer
+  for (int i = 0; i < SHOCK_BUFFER_SIZE; i++) {
+    shockBuffer[i] = 0.0;
+  }
   
   // Initialize vibration buffer
   for (int i = 0; i < VIBRATION_BUFFER_SIZE; i++) {
@@ -148,7 +160,8 @@ void setup() {
     Serial.println("✅ GY-521 sensor initialized!");
     Serial.println("📊 Conversion: ±16g range, ±250°/s range");
     Serial.println("📊 Output: Raw LSB + m/s² + deg/s");
-    Serial.println("📳 Vibration detection enabled for widget");
+    Serial.println("📳 Shock detection: Accelerometer spikes");
+    Serial.println("🔄 Vibration detection: Gyroscope oscillations");
   }
   
   // Initialize Ultrasonic sensors
@@ -162,7 +175,8 @@ void setup() {
   Serial.println("\n--- MULTI-SENSOR MONITORING STARTED ---");
   Serial.println("📡 Communication: MQTT Primary + HTTP Backup");
   Serial.println("🔄 GY-521: LSB → g → m/s² conversion enabled");
-  Serial.println("📳 Vibration: Real-time magnitude calculation");
+  Serial.println("📳 Shock: Accelerometer magnitude changes (m/s²)");
+  Serial.println("🔄 Vibration: Gyroscope magnitude (deg/s)");
   Serial.println();
 }
 
@@ -255,9 +269,10 @@ void processSensorData() {
   
   readSensorData();
   convertSensorData();
-  calculateVibrationMagnitude();  // FUNGSI BARU UNTUK GETARAN
+  calculateShockMagnitude();      // FUNGSI BARU UNTUK SHOCK
+  calculateVibrationMagnitude();  // FUNGSI BARU UNTUK VIBRATION
+  checkShock();
   checkVibration();
-  checkRotation();
 }
 
 void checkSensorConnection() {
@@ -318,10 +333,37 @@ void convertSensorData() {
   rotationMagnitude_dps = sqrt(gyroX_dps * gyroX_dps + gyroY_dps * gyroY_dps + gyroZ_dps * gyroZ_dps);
 }
 
-// FUNGSI BARU: Hitung magnitude getaran untuk widget
+// FUNGSI BARU: Hitung magnitude shock dari accelerometer
+void calculateShockMagnitude() {
+  // Hitung perubahan accelerometer magnitude (shock detection)
+  float rawShock = abs(accelMagnitude_ms2 - prevAccelMagnitude_ms2);
+  
+  // Masukkan ke buffer untuk smoothing
+  shockBuffer[shockBufferIndex] = rawShock;
+  shockBufferIndex = (shockBufferIndex + 1) % SHOCK_BUFFER_SIZE;
+  
+  if (shockBufferIndex == 0) {
+    shockBufferFull = true;
+  }
+  
+  // Hitung moving average untuk smoothing
+  float sum = 0;
+  int count = shockBufferFull ? SHOCK_BUFFER_SIZE : shockBufferIndex;
+  
+  for (int i = 0; i < count; i++) {
+    sum += shockBuffer[i];
+  }
+  
+  shockMagnitude_ms2 = sum / count;
+  
+  // Update previous magnitude
+  prevAccelMagnitude_ms2 = accelMagnitude_ms2;
+}
+
+// FUNGSI BARU: Hitung magnitude vibration dari gyroscope
 void calculateVibrationMagnitude() {
-  // Hitung perubahan accelerometer magnitude
-  float rawVibration = abs(accelMagnitude_ms2 - prevAccelMagnitude_ms2);
+  // Gunakan rotationMagnitude_dps langsung sebagai vibration
+  float rawVibration = rotationMagnitude_dps;
   
   // Masukkan ke buffer untuk smoothing
   vibrationBuffer[vibrationBufferIndex] = rawVibration;
@@ -339,29 +381,23 @@ void calculateVibrationMagnitude() {
     sum += vibrationBuffer[i];
   }
   
-  vibrationMagnitude_ms2 = sum / count;
-  
-  // Update previous magnitude
-  prevAccelMagnitude_ms2 = accelMagnitude_ms2;
+  vibrationMagnitude_dps = sum / count;
 }
 
-void checkVibration() {
-  if (vibrationMagnitude_ms2 > vibrationThreshold_ms2) {
-    Serial.println("📳 VIBRATION/SHOCK DETECTED!");
-    Serial.print("Vibration magnitude: "); 
-    Serial.print(vibrationMagnitude_ms2); 
+void checkShock() {
+  if (shockMagnitude_ms2 > shockThreshold_ms2) {
+    Serial.println("📳 SHOCK DETECTED!");
+    Serial.print("Shock magnitude: "); 
+    Serial.print(shockMagnitude_ms2); 
     Serial.println(" m/s²");
   }
 }
 
-void checkRotation() {
-  if (abs(gyroX_dps) > rotationThreshold_dps || 
-      abs(gyroY_dps) > rotationThreshold_dps || 
-      abs(gyroZ_dps) > rotationThreshold_dps) {
-    Serial.println("🔄 ROTATION DETECTED!");
-    Serial.print("Rotation - X: "); Serial.print(gyroX_dps); 
-    Serial.print(" | Y: "); Serial.print(gyroY_dps); 
-    Serial.print(" | Z: "); Serial.print(gyroZ_dps); 
+void checkVibration() {
+  if (vibrationMagnitude_dps > vibrationThreshold_dps) {
+    Serial.println("🔄 VIBRATION DETECTED!");
+    Serial.print("Vibration magnitude: "); 
+    Serial.print(vibrationMagnitude_dps); 
     Serial.println(" deg/s");
   }
 }
@@ -514,10 +550,11 @@ String createThingsBoardPayload() {
     payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
-  // Motion Sensor Data - TERMASUK VIBRATION MAGNITUDE UNTUK WIDGET
+  // Motion Sensor Data - TERMASUK SHOCK & VIBRATION MAGNITUDE
   if (sensorDetected) {
-    // NILAI GETARAN UTAMA UNTUK WIDGET GAUGE
-    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_ms2, 2) + ",";
+    // NILAI SHOCK & VIBRATION UTAMA UNTUK WIDGET
+    payload += "\"shock_magnitude\":" + String(shockMagnitude_ms2, 2) + ",";
+    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_dps, 2) + ",";
     
     // Converted accelerometer data (m/s²)
     payload += "\"accel_magnitude_ms2\":" + String(accelMagnitude_ms2, 2) + ",";
@@ -525,7 +562,7 @@ String createThingsBoardPayload() {
     payload += "\"accel_y_ms2\":" + String(accelY_ms2, 2) + ",";
     payload += "\"accel_z_ms2\":" + String(accelZ_ms2, 2) + ",";
     
-    // Converted gyroscope data (deg/s) - masih kirim untuk monitoring
+    // Converted gyroscope data (deg/s)
     payload += "\"rotation_magnitude_dps\":" + String(rotationMagnitude_dps, 2) + ",";
     payload += "\"gyro_x_dps\":" + String(gyroX_dps, 2) + ",";
     payload += "\"gyro_y_dps\":" + String(gyroY_dps, 2) + ",";
@@ -557,7 +594,7 @@ String createFlaskPayload() {
     payload += "\"satellites\":" + String(gps.satellites.value()) + ",";
   }
   
-  // Data GY-521 untuk Flask (RAW + CONVERTED + VIBRATION)
+  // Data GY-521 untuk Flask (RAW + CONVERTED + SHOCK + VIBRATION)
   if (sensorDetected) {
     // Raw data (untuk backup/debugging)
     payload += "\"accelX\":" + String(accelX) + ",";
@@ -577,8 +614,9 @@ String createFlaskPayload() {
     payload += "\"gyroZ_dps\":" + String(gyroZ_dps, 2) + ",";
     payload += "\"rotation_magnitude_dps\":" + String(rotationMagnitude_dps, 2) + ",";
     
-    // VIBRATION MAGNITUDE untuk Flask juga
-    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_ms2, 2) + ",";
+    // SHOCK & VIBRATION MAGNITUDE untuk Flask
+    payload += "\"shock_magnitude\":" + String(shockMagnitude_ms2, 2) + ",";
+    payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_dps, 2) + ",";
   }
   
   // Ultrasonic data untuk Flask
@@ -665,15 +703,19 @@ void printCommunicationStats() {
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
   
-  // Print conversion info + VIBRATION INFO
+  // Print conversion info + SHOCK & VIBRATION INFO
   if (sensorDetected) {
     Serial.println("🔄 === GY-521 CONVERSION STATUS ===");
     Serial.print("Accel Magnitude: ");
     Serial.print(accelMagnitude_ms2);
     Serial.println(" m/s²");
-    Serial.print("Vibration Magnitude: ");  // TAMBAHAN BARU
-    Serial.print(vibrationMagnitude_ms2);
-    Serial.print(" m/s² (Widget Value)");
+    Serial.print("Shock Magnitude: ");
+    Serial.print(shockMagnitude_ms2);
+    Serial.print(" m/s² (Accelerometer Changes)");
+    Serial.println();
+    Serial.print("Vibration Magnitude: ");
+    Serial.print(vibrationMagnitude_dps);
+    Serial.print(" deg/s (Gyroscope Rotations)");
     Serial.println();
     Serial.print("Rotation Magnitude: ");
     Serial.print(rotationMagnitude_dps);

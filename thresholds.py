@@ -1,7 +1,8 @@
 # Konfigurasi threshold untuk deteksi anomali dan klasifikasi kerusakan jalan
-# SISTEM KLASIFIKASI SEDERHANA - RULE BASED DENGAN LOGIKA AND
-# UPDATED: GY-521 menggunakan m/s² untuk accelerometer
-# ADDED: Filter getaran kendaraan untuk membedakan getaran motor vs jalan rusak
+# SISTEM KLASIFIKASI 3 PARAMETER - RULE BASED
+# PARAMETER 1: Surface Change (cm) - Ultrasonic
+# PARAMETER 2: Shock (m/s²) - Accelerometer dengan filter kendaraan
+# PARAMETER 3: Vibration (deg/s) - Gyroscope dengan filter kendaraan & slope
 
 # === THRESHOLD SENSOR ===
 
@@ -9,59 +10,85 @@
 SURFACE_CHANGE_THRESHOLDS = {
     'minor': 2.5,      # cm - perubahan kecil
     'moderate': 5.0,   # cm - perubahan sedang
-    'major': 7.0      # cm - perubahan besar
+    'major': 7.0       # cm - perubahan besar
 }
 
-# GY-521 Accelerometer Thresholds (UPDATED untuk m/s²)
+# Accelerometer Shock Thresholds (m/s²)
+SHOCK_THRESHOLDS = {
+    'light': 25.0,     # m/s² - guncangan ringan
+    'moderate': 30.0,  # m/s² - guncangan sedang
+    'heavy': 40.0      # m/s² - guncangan berat
+}
+
+# Gyroscope Vibration Thresholds (deg/s)
 VIBRATION_THRESHOLDS = {
-    'light': 25.0,       # m/s² - guncangan ringan
-    'moderate': 30.0,    # m/s² - guncangan sedang
-    'heavy': 40.0       # m/s² - guncangan berat
+    'light': 100.0,    # deg/s - getaran ringan
+    'moderate': 150.0, # deg/s - getaran sedang
+    'heavy': 200.0     # deg/s - getaran berat
 }
 
-# GY-521 Gyroscope Thresholds (dalam deg/s - TIDAK DIGUNAKAN untuk klasifikasi)
-ROTATION_THRESHOLDS = {
-    'normal': 100,      # deg/s - rotasi normal
-    'moderate': 300,    # deg/s - rotasi sedang
-    'excessive': 500    # deg/s - rotasi berlebihan
-}
-
-# === FILTER GETARAN KENDARAAN ===
-# Parameter untuk membedakan getaran motor vs getaran jalan rusak
-VEHICLE_VIBRATION_FILTER = {
-    # Range getaran normal kendaraan bermotor (dalam m/s²)
-    'baseline_min': 0.5,    # m/s² - getaran minimum kendaraan idle
-    'baseline_max': 18.0,    # m/s² - getaran maksimum kendaraan normal
+# === FILTER GUNCANGAN KENDARAAN (SHOCK) ===
+# Parameter untuk membedakan guncangan motor vs guncangan jalan rusak
+VEHICLE_SHOCK_FILTER = {
+    # Range guncangan normal kendaraan bermotor (dalam m/s²)
+    'baseline_min': 0.5,    # m/s² - guncangan minimum kendaraan idle
+    'baseline_max': 20.0,   # m/s² - guncangan maksimum kendaraan normal
     
     # Toleransi untuk baseline consistency
     'baseline_tolerance': 5.0,  # m/s² - toleransi dari baseline median
     
-    # Gradien maksimum untuk getaran kendaraan (perubahan bertahap)
-    'max_gradient': 5.0,    # m/s² - perubahan maksimum antar sample untuk getaran kendaraan
+    # Gradien maksimum untuk guncangan kendaraan (perubahan bertahap)
+    'max_gradient': 5.0,    # m/s² - perubahan maksimum antar sample untuk guncangan kendaraan
     
-    # Threshold untuk spike jalan rusak (pasti bukan getaran kendaraan)
+    # Threshold untuk spike jalan rusak (pasti bukan guncangan kendaraan)
     'road_spike_threshold': 25.0,  # m/s² - di atas ini pasti jalan rusak
     
     # Minimum sample untuk analisis pola
     'min_samples': 3        # minimum data point untuk analisis
 }
 
-# === KLASIFIKASI KERUSAKAN JALAN (RULE-BASED DENGAN LOGIKA AND) ===
+# === FILTER GETARAN KENDARAAN (VIBRATION) ===
+# Parameter untuk membedakan getaran motor vs getaran jalan rusak vs tanjakan/turunan
+VEHICLE_VIBRATION_FILTER = {
+    # Range getaran normal kendaraan bermotor (dalam deg/s)
+    'baseline_min': 10.0,   # deg/s - getaran minimum kendaraan idle
+    'baseline_max': 80.0,   # deg/s - getaran maksimum kendaraan normal
+    
+    # Toleransi untuk baseline consistency
+    'baseline_tolerance': 20.0,  # deg/s - toleransi dari baseline median
+    
+    # Gradien maksimum untuk getaran kendaraan (perubahan bertahap)
+    'max_gradient': 15.0,   # deg/s - perubahan maksimum antar sample untuk getaran kendaraan
+    
+    # Threshold untuk spike jalan rusak (pasti bukan getaran kendaraan)
+    'road_spike_threshold': 100.0,  # deg/s - di atas ini pasti jalan rusak
+    
+    # Parameter untuk deteksi tanjakan/turunan
+    'slope_trend_threshold': 5.0,   # deg/s - tren linear maksimum untuk slope
+    'slope_amplitude_threshold': 60.0,  # deg/s - amplitudo maksimum untuk slope
+    
+    # Minimum sample untuk analisis pola
+    'min_samples': 3        # minimum data point untuk analisis
+}
 
-# Threshold untuk klasifikasi langsung dengan logika AND 
-# UPDATED: Vibration threshold dalam m/s² (setelah difilter)
-DAMAGE_CLASSIFICATION_AND = {
+# === KLASIFIKASI KERUSAKAN JALAN (3 PARAMETER) ===
+
+# Threshold untuk klasifikasi dengan 3 parameter
+DAMAGE_CLASSIFICATION_3PARAM = {
     'rusak_berat': {
-        'surface_change': 7.0,   # >= 10 cm
-        'vibration': 40.0,        # >= 10.0 m/s² (filtered)
+        'surface_change': 7.0,   # >= 7 cm
+        'shock': 40.0,           # >= 40.0 m/s² (filtered)
+        'vibration': 200.0,      # >= 200.0 deg/s (filtered)
     },
     'rusak_sedang': {
-        'surface_change': 5.0,    # >= 5 cm
-        'vibration': 30.0,         # >= 5.0 m/s² (filtered)
+        'surface_change': 5.0,   # >= 5 cm
+        'shock': 30.0,           # >= 30.0 m/s² (filtered)
+        'vibration': 150.0,      # >= 150.0 deg/s (filtered)
     },
     'rusak_ringan': {
-        'surface_change': 2.5,    # >= 2 cm
-        'vibration': 25.0,         # >= 2.0 m/s² (filtered)
+        'surface_change': 2.5,   # >= 2.5 cm
+        'shock': 25.0,           # >= 25.0 m/s² (filtered)
+        'vibration': 100.0,      # >= 100.0 deg/s (filtered)
     }
 }
 
@@ -96,8 +123,19 @@ def get_surface_change_severity(change_value):
         return 'minor'
     return 'normal'
 
-def get_vibration_severity(vibration_value):
+def get_shock_severity(shock_value):
     """Mendapatkan tingkat keparahan guncangan (dalam m/s² - sudah difilter)"""
+    abs_shock = abs(shock_value)
+    if abs_shock >= SHOCK_THRESHOLDS['heavy']:
+        return 'heavy'
+    elif abs_shock >= SHOCK_THRESHOLDS['moderate']:
+        return 'moderate'
+    elif abs_shock >= SHOCK_THRESHOLDS['light']:
+        return 'light'
+    return 'normal'
+
+def get_vibration_severity(vibration_value):
+    """Mendapatkan tingkat keparahan getaran (dalam deg/s - sudah difilter)"""
     abs_vibration = abs(vibration_value)
     if abs_vibration >= VIBRATION_THRESHOLDS['heavy']:
         return 'heavy'
@@ -107,33 +145,19 @@ def get_vibration_severity(vibration_value):
         return 'light'
     return 'normal'
 
-def get_rotation_severity(rotation_value):
-    """Mendapatkan tingkat keparahan rotasi (dalam deg/s) - TIDAK DIGUNAKAN"""
-    abs_rotation = abs(rotation_value)
-    if abs_rotation >= ROTATION_THRESHOLDS['excessive']:
-        return 'excessive'
-    elif abs_rotation >= ROTATION_THRESHOLDS['moderate']:
-        return 'moderate'
-    elif abs_rotation >= ROTATION_THRESHOLDS['normal']:
-        return 'normal'
-    return 'minimal'
-
-def classify_damage_or_logic(max_surface_change, max_vibration, max_rotation):
+def classify_damage_three_params(max_surface_change, max_shock, max_vibration):
     """
-    Klasifikasi kerusakan jalan dengan metode rule-based sederhana menggunakan LOGIKA AND
-    ROTASI DIHAPUS DARI KLASIFIKASI
-    VIBRATION THRESHOLD DALAM m/s² (SUDAH DIFILTER DARI GETARAN KENDARAAN)
+    Klasifikasi kerusakan jalan dengan 3 parameter: Surface + Shock + Vibration
     
-    Logika AND:
-    - Jika KEDUA parameter (surface_change AND vibration) memenuhi threshold RUSAK BERAT → RUSAK BERAT
-    - Jika KEDUA parameter (surface_change AND vibration) memenuhi threshold RUSAK SEDANG → RUSAK SEDANG  
-    - Jika KEDUA parameter (surface_change AND vibration) memenuhi threshold RUSAK RINGAN → RUSAK RINGAN
-    - Jika tidak kedua parameter memenuhi → BAIK
+    Logika Klasifikasi:
+    - Menggunakan kombinasi threshold dari ketiga parameter
+    - Shock dan Vibration sudah difilter dari noise kendaraan
+    - Prioritas berdasarkan tingkat keparahan parameter
     
     Args:
         max_surface_change (float): Perubahan permukaan maksimum (cm)
-        max_vibration (float): Getaran maksimum (m/s²) - SUDAH DIFILTER
-        max_rotation (float): DIABAIKAN - tidak digunakan lagi
+        max_shock (float): Guncangan maksimum (m/s²) - SUDAH DIFILTER
+        max_vibration (float): Getaran maksimum (deg/s) - SUDAH DIFILTER
     
     Returns:
         str: Klasifikasi kerusakan ('rusak_berat', 'rusak_sedang', 'rusak_ringan', 'baik')
@@ -141,146 +165,157 @@ def classify_damage_or_logic(max_surface_change, max_vibration, max_rotation):
     
     # Set default values untuk data yang None
     surface = max_surface_change if max_surface_change is not None else 0
+    shock = max_shock if max_shock is not None else 0
     vibration = max_vibration if max_vibration is not None else 0
-    # rotation diabaikan
     
-    print(f"🔍 Klasifikasi AND Logic (FILTERED): Surface={surface:.2f}cm, Vibration={vibration:.2f}m/s²")
+    print(f"🔍 Klasifikasi 3 Parameter: Surface={surface:.2f}cm, Shock={shock:.2f}m/s², Vibration={vibration:.2f}deg/s")
     
-    # Cek RUSAK BERAT (KEDUA parameter harus memenuhi)
-    if (surface >= DAMAGE_CLASSIFICATION_AND['rusak_berat']['surface_change'] and
-        vibration >= DAMAGE_CLASSIFICATION_AND['rusak_berat']['vibration']):
-        
-        print(f"📊 Klasifikasi: RUSAK BERAT - Surface({surface:.1f}cm) AND Vibration({vibration:.1f}m/s²) MEMENUHI")
+    # Hitung score berdasarkan berapa parameter yang memenuhi threshold
+    rusak_berat_score = 0
+    rusak_sedang_score = 0
+    rusak_ringan_score = 0
+    
+    # Cek parameter untuk RUSAK BERAT
+    if surface >= DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['surface_change']:
+        rusak_berat_score += 1
+    if shock >= DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['shock']:
+        rusak_berat_score += 1
+    if vibration >= DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['vibration']:
+        rusak_berat_score += 1
+    
+    # Cek parameter untuk RUSAK SEDANG
+    if surface >= DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['surface_change']:
+        rusak_sedang_score += 1
+    if shock >= DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['shock']:
+        rusak_sedang_score += 1
+    if vibration >= DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['vibration']:
+        rusak_sedang_score += 1
+    
+    # Cek parameter untuk RUSAK RINGAN
+    if surface >= DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['surface_change']:
+        rusak_ringan_score += 1
+    if shock >= DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['shock']:
+        rusak_ringan_score += 1
+    if vibration >= DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['vibration']:
+        rusak_ringan_score += 1
+    
+    # Logika klasifikasi berdasarkan score
+    # Minimal 2 dari 3 parameter harus memenuhi threshold
+    
+    if rusak_berat_score >= 2:
+        print(f"📊 Klasifikasi: RUSAK BERAT - {rusak_berat_score}/3 parameter memenuhi threshold")
         return 'rusak_berat'
-    
-    # Cek RUSAK SEDANG (KEDUA parameter harus memenuhi)
-    elif (surface >= DAMAGE_CLASSIFICATION_AND['rusak_sedang']['surface_change'] and
-          vibration >= DAMAGE_CLASSIFICATION_AND['rusak_sedang']['vibration']):
-        
-        print(f"📊 Klasifikasi: RUSAK SEDANG - Surface({surface:.1f}cm) AND Vibration({vibration:.1f}m/s²) MEMENUHI")
+    elif rusak_sedang_score >= 2:
+        print(f"📊 Klasifikasi: RUSAK SEDANG - {rusak_sedang_score}/3 parameter memenuhi threshold")
         return 'rusak_sedang'
-    
-    # Cek RUSAK RINGAN (KEDUA parameter harus memenuhi)
-    elif (surface >= DAMAGE_CLASSIFICATION_AND['rusak_ringan']['surface_change'] and
-          vibration >= DAMAGE_CLASSIFICATION_AND['rusak_ringan']['vibration']):
-        
-        print(f"📊 Klasifikasi: RUSAK RINGAN - Surface({surface:.1f}cm) AND Vibration({vibration:.1f}m/s²) MEMENUHI")
+    elif rusak_ringan_score >= 2:
+        print(f"📊 Klasifikasi: RUSAK RINGAN - {rusak_ringan_score}/3 parameter memenuhi threshold")
         return 'rusak_ringan'
-    
-    # Jika tidak kedua parameter memenuhi, jalan masih dalam kondisi baik
     else:
-        print(f"📊 Klasifikasi: BAIK - Tidak kedua parameter memenuhi threshold kerusakan")
-        print(f"   Surface: {surface:.1f}cm (perlu ≥{DAMAGE_CLASSIFICATION_AND['rusak_ringan']['surface_change']}cm)")
-        print(f"   Vibration: {vibration:.1f}m/s² (perlu ≥{DAMAGE_CLASSIFICATION_AND['rusak_ringan']['vibration']}m/s²)")
-        print(f"   Note: Vibration sudah difilter dari getaran kendaraan")
+        print(f"📊 Klasifikasi: BAIK - Tidak cukup parameter memenuhi threshold")
+        print(f"   Berat: {rusak_berat_score}/3, Sedang: {rusak_sedang_score}/3, Ringan: {rusak_ringan_score}/3")
+        print(f"   Shock & Vibration sudah difilter dari noise kendaraan")
         return 'baik'
 
 # === FUNGSI UNTUK BACKWARD COMPATIBILITY ===
 
-def classify_damage_simple(max_surface_change, max_vibration, max_rotation):
-    """Alias untuk kompatibilitas - menggunakan logika AND dengan vibration filter"""
-    return classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
+def classify_damage_or_logic(max_surface_change, max_shock, max_vibration):
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
 
-def classify_damage_flexible(max_surface_change, max_vibration, max_rotation):
-    """Alias untuk kompatibilitas - menggunakan logika AND dengan vibration filter"""
-    return classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
+def classify_damage_simple(max_surface_change, max_shock, max_vibration):
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
 
-def calculate_damage_score(surface_changes, vibrations, rotations, frequency_factor):
-    """
-    Fungsi ini masih ada untuk kompatibilitas dengan kode lama,
-    tapi sekarang tidak digunakan karena tidak ada scoring
-    """
-    # Return dummy score 0 karena tidak digunakan lagi
+def classify_damage_flexible(max_surface_change, max_shock, max_vibration):
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
+
+# Legacy functions untuk kompatibilitas
+def calculate_damage_score(surface_changes, shocks, vibrations, frequency_factor):
+    """Fungsi legacy - tidak digunakan lagi"""
     return 0
 
 def classify_damage(damage_score):
-    """
-    Fungsi ini masih ada untuk kompatibilitas dengan kode lama,
-    tapi sekarang tidak digunakan karena tidak ada scoring
-    """
-    # Return default 'baik' karena tidak digunakan lagi
+    """Fungsi legacy - tidak digunakan lagi"""
     return 'baik'
 
 # === DEBUGGING FUNCTIONS ===
 
-# def print_vibration_filter_info():
-#     """Print informasi tentang filter getaran kendaraan"""
+# def print_classification_info():
+#     """Print informasi tentang sistem klasifikasi 3 parameter"""
 #     print("=" * 60)
-#     print("🔧 INFORMASI FILTER GETARAN KENDARAAN")
+#     print("🔍 SISTEM KLASIFIKASI 3 PARAMETER")
 #     print("=" * 60)
-#     print("📊 PARAMETER FILTER:")
-#     print(f"   - Baseline Range: {VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} m/s²")
-#     print(f"   - Baseline Tolerance: ±{VEHICLE_VIBRATION_FILTER['baseline_tolerance']} m/s²")
-#     print(f"   - Max Gradient: {VEHICLE_VIBRATION_FILTER['max_gradient']} m/s²")
-#     print(f"   - Road Spike Threshold: {VEHICLE_VIBRATION_FILTER['road_spike_threshold']} m/s²")
+#     print("📊 PARAMETER:")
+#     print("   1. Surface Change (cm) - Ultrasonic sensors")
+#     print("   2. Shock (m/s²) - Accelerometer (filtered)")
+#     print("   3. Vibration (deg/s) - Gyroscope (filtered)")
 #     print("")
-#     print("📊 CARA KERJA:")
-#     print("   1. Hitung baseline (median) getaran")
-#     print("   2. Filter getaran dalam range normal kendaraan")
-#     print("   3. Deteksi gradien halus (getaran kendaraan)")
-#     print("   4. Identifikasi spike tinggi (jalan rusak)")
-#     print("   5. Hanya analisis getaran jalan rusak")
+#     print("📊 THRESHOLD:")
+#     print(f"   RUSAK BERAT: Surface≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['surface_change']}cm, Shock≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['shock']}m/s², Vibration≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_berat']['vibration']}deg/s")
+#     print(f"   RUSAK SEDANG: Surface≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['surface_change']}cm, Shock≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['shock']}m/s², Vibration≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_sedang']['vibration']}deg/s")
+#     print(f"   RUSAK RINGAN: Surface≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['surface_change']}cm, Shock≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['shock']}m/s², Vibration≥{DAMAGE_CLASSIFICATION_3PARAM['rusak_ringan']['vibration']}deg/s")
 #     print("")
-#     print("📊 LOGIKA FILTER:")
-#     print("   - Getaran Kendaraan: Konsisten, dalam range baseline")
-#     print("   - Getaran Jalan Rusak: Spike mendadak, di atas threshold")
-#     print("   - Hasil: Hanya getaran jalan rusak yang dianalisis")
+#     print("📊 LOGIKA:")
+#     print("   - Minimal 2 dari 3 parameter harus memenuhi threshold")
+#     print("   - Shock & Vibration sudah difilter dari noise kendaraan")
+#     print("   - Vibration difilter dari noise tanjakan/turunan")
 #     print("=" * 60)
 
-# def print_conversion_info():
-#     """Print informasi tentang konversi satuan untuk debugging"""
+# def print_filter_info():
+#     """Print informasi tentang filter kendaraan"""
 #     print("=" * 60)
-#     print("🔄 INFORMASI KONVERSI SATUAN GY-521")
+#     print("🔧 FILTER KENDARAAN & SLOPE")
 #     print("=" * 60)
-#     print("📊 ACCELEROMETER:")
-#     print("   - Raw Data: LSB (dari sensor)")
-#     print("   - Konversi: LSB → g → m/s²")
-#     print("   - Scale Factor: 2048 LSB/g (untuk ±16g range)")
-#     print("   - Gravity: 9.81 m/s²")
-#     print("   - Threshold baru: 2.0, 5.0, 10.0 m/s²")
-#     print("   - FILTER: Getaran kendaraan dihapus")
+#     print("📊 SHOCK FILTER (m/s²):")
+#     print(f"   - Baseline Range: {VEHICLE_SHOCK_FILTER['baseline_min']}-{VEHICLE_SHOCK_FILTER['baseline_max']} m/s²")
+#     print(f"   - Tolerance: ±{VEHICLE_SHOCK_FILTER['baseline_tolerance']} m/s²")
+#     print(f"   - Spike Threshold: {VEHICLE_SHOCK_FILTER['road_spike_threshold']} m/s²")
 #     print("")
-#     print("📊 GYROSCOPE:")
-#     print("   - Raw Data: LSB (dari sensor)")
-#     print("   - Konversi: LSB → deg/s")
-#     print("   - Scale Factor: 131 LSB/(deg/s) (untuk ±250°/s range)")
-#     print("   - Status: TIDAK DIGUNAKAN untuk klasifikasi")
+#     print("📊 VIBRATION FILTER (deg/s):")
+#     print(f"   - Baseline Range: {VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} deg/s")
+#     print(f"   - Tolerance: ±{VEHICLE_VIBRATION_FILTER['baseline_tolerance']} deg/s")
+#     print(f"   - Spike Threshold: {VEHICLE_VIBRATION_FILTER['road_spike_threshold']} deg/s")
+#     print(f"   - Slope Trend Threshold: {VEHICLE_VIBRATION_FILTER['slope_trend_threshold']} deg/s")
+#     print(f"   - Slope Amplitude Threshold: {VEHICLE_VIBRATION_FILTER['slope_amplitude_threshold']} deg/s")
 #     print("")
-#     print("📊 KLASIFIKASI:")
-#     print("   - Logika: AND (Surface AND Vibration)")
-#     print("   - Parameter: Surface Change (cm) + Vibration (m/s² filtered)")
-#     print("   - Rotasi: DIHAPUS dari kriteria")
-#     print("   - Filter: Getaran kendaraan diabaikan")
+#     print("📊 FILTER LOGIC:")
+#     print("   - Shock: Filters vehicle engine vibrations")
+#     print("   - Vibration: Filters vehicle + slope/incline patterns")
+#     print("   - Only road damage signals are analyzed")
 #     print("=" * 60)
 
 # if __name__ == "__main__":
-#     # Test the conversion info
-#     print_conversion_info()
+#     # Print system info
+#     print_classification_info()
 #     print()
-#     print_vibration_filter_info()
+#     print_filter_info()
     
 #     # Test classification
-#     print("\n🧪 TEST KLASIFIKASI (DENGAN FILTER):")
+#     print("\n🧪 TEST KLASIFIKASI 3 PARAMETER:")
 #     test_cases = [
-#         (15.0, 12.0, 0),  # Rusak berat
-#         (7.0, 7.0, 0),    # Rusak sedang
-#         (3.0, 3.0, 0),    # Rusak ringan
-#         (10.0, 1.0, 0),   # Baik (hanya surface tinggi)
-#         (1.0, 10.0, 0),   # Baik (hanya vibration tinggi)
-#         (1.0, 1.0, 0),    # Baik (kedua rendah)
-#         (5.0, 2.5, 0),    # Baik (surface memenuhi tapi vibration tidak)
-#         (2.5, 5.0, 0),    # Baik (vibration memenuhi tapi surface tidak)
+#         (8.0, 45.0, 220.0),   # Rusak berat (3/3 parameter)
+#         (6.0, 35.0, 180.0),   # Rusak sedang (3/3 parameter)
+#         (3.0, 28.0, 120.0),   # Rusak ringan (3/3 parameter)
+#         (8.0, 45.0, 50.0),    # Rusak sedang (2/3 parameter - surface + shock)
+#         (3.0, 15.0, 180.0),   # Rusak ringan (2/3 parameter - surface + vibration)
+#         (1.0, 35.0, 180.0),   # Rusak ringan (2/3 parameter - shock + vibration)
+#         (8.0, 15.0, 50.0),    # Baik (1/3 parameter - hanya surface)
+#         (1.0, 45.0, 50.0),    # Baik (1/3 parameter - hanya shock)
+#         (1.0, 15.0, 220.0),   # Baik (1/3 parameter - hanya vibration)
+#         (1.0, 15.0, 50.0),    # Baik (0/3 parameter)
 #     ]
     
-#     for i, (surface, vibration, rotation) in enumerate(test_cases, 1):
-#         print(f"\nTest {i}: Surface={surface}cm, Vibration={vibration}m/s² (filtered)")
-#         result = classify_damage_or_logic(surface, vibration, rotation)
+#     for i, (surface, shock, vibration) in enumerate(test_cases, 1):
+#         print(f"\nTest {i}: Surface={surface}cm, Shock={shock}m/s², Vibration={vibration}deg/s")
+#         result = classify_damage_three_params(surface, shock, vibration)
 #         print(f"Result: {result}")
         
 #     print("\n" + "=" * 60)
 #     print("💡 CATATAN PENTING:")
-#     print("   - Vibration yang digunakan sudah difilter dari getaran kendaraan")
-#     print("   - Hanya getaran akibat jalan rusak yang dianalisis")
-#     print("   - Threshold vibration berlaku untuk getaran jalan, bukan kendaraan")
-#     print("   - Klasifikasi lebih akurat karena noise kendaraan dihilangkan")
+#     print("   - Shock & Vibration yang digunakan sudah difilter dari noise kendaraan")
+#     print("   - Vibration juga difilter dari noise tanjakan/turunan")
+#     print("   - Minimal 2 dari 3 parameter harus memenuhi threshold")
+#     print("   - Klasifikasi lebih akurat dengan 3 parameter")
 #     print("=" * 60)

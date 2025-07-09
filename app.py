@@ -16,9 +16,9 @@ import base64
 from dotenv import load_dotenv
 from thresholds import (
     MIN_DATA_POINTS, ANALYSIS_INTERVAL, EARTH_RADIUS, MAX_GPS_GAP,
-    SURFACE_CHANGE_THRESHOLDS, VIBRATION_THRESHOLDS, ROTATION_THRESHOLDS,
-    get_surface_change_severity, get_vibration_severity, get_rotation_severity,
-    classify_damage_or_logic, VEHICLE_VIBRATION_FILTER  # Import filter kendaraan
+    SURFACE_CHANGE_THRESHOLDS, SHOCK_THRESHOLDS, VIBRATION_THRESHOLDS,
+    get_surface_change_severity, get_shock_severity, get_vibration_severity,
+    classify_damage_three_params, VEHICLE_SHOCK_FILTER, VEHICLE_VIBRATION_FILTER
 )
 
 # Load environment variables
@@ -89,12 +89,108 @@ def get_db_connection():
         print(f"❌ Error connecting to MySQL: {e}")
         return None
 
+def filter_vehicle_shock(shocks, timestamps=None):
+    """
+    Filter guncangan kendaraan bermotor dari guncangan jalan rusak
+    
+    Args:
+        shocks (list): List guncangan dalam m/s²
+        timestamps (list): List timestamp untuk analisis pola (optional)
+    
+    Returns:
+        dict: Hasil filter dengan guncangan yang sudah dibersihkan
+    """
+    if not shocks or len(shocks) < 3:
+        return {
+            'filtered_shocks': shocks,
+            'vehicle_shocks': [],
+            'road_shocks': shocks,
+            'filter_applied': False,
+            'stats': {
+                'total_count': len(shocks),
+                'vehicle_count': 0,
+                'road_count': len(shocks)
+            }
+        }
+    
+    # Konversi ke numpy array untuk analisis
+    shock_array = np.array(shocks)
+    
+    # Hitung baseline guncangan (guncangan konstan kendaraan)
+    baseline = np.median(shock_array)
+    
+    # Variasi guncangan (guncangan motor cenderung konsisten)
+    shock_std = np.std(shock_array)
+    shock_mean = np.mean(shock_array)
+    
+    # Deteksi lonjakan guncangan yang tidak wajar (indikasi jalan rusak)
+    vehicle_shocks = []
+    road_shocks = []
+    
+    for i, shock in enumerate(shock_array):
+        is_vehicle_shock = False
+        
+        # Kriteria 1: Guncangan dalam range normal kendaraan
+        if (VEHICLE_SHOCK_FILTER['baseline_min'] <= shock <= VEHICLE_SHOCK_FILTER['baseline_max']):
+            is_vehicle_shock = True
+        
+        # Kriteria 2: Guncangan konsisten dengan baseline
+        if abs(shock - baseline) <= VEHICLE_SHOCK_FILTER['baseline_tolerance']:
+            is_vehicle_shock = True
+        
+        # Kriteria 3: Analisis pola jika ada data sekitar
+        if i > 0 and i < len(shock_array) - 1:
+            prev_shock = shock_array[i-1]
+            next_shock = shock_array[i+1]
+            
+            # Guncangan motor cenderung gradual, bukan spike tiba-tiba
+            gradient_prev = abs(shock - prev_shock)
+            gradient_next = abs(shock - next_shock)
+            
+            if (gradient_prev <= VEHICLE_SHOCK_FILTER['max_gradient'] and 
+                gradient_next <= VEHICLE_SHOCK_FILTER['max_gradient']):
+                is_vehicle_shock = True
+        
+        # Kriteria 4: Override untuk spike tinggi (pasti jalan rusak)
+        if shock >= VEHICLE_SHOCK_FILTER['road_spike_threshold']:
+            is_vehicle_shock = False
+        
+        # Kategorikan guncangan
+        if is_vehicle_shock:
+            vehicle_shocks.append(shock)
+        else:
+            road_shocks.append(shock)
+    
+    # Hasil filter
+    result = {
+        'filtered_shocks': road_shocks,  # Hanya guncangan jalan
+        'vehicle_shocks': vehicle_shocks,  # Guncangan kendaraan
+        'road_shocks': road_shocks,  # Guncangan jalan rusak
+        'filter_applied': True,
+        'stats': {
+            'total_count': len(shocks),
+            'vehicle_count': len(vehicle_shocks),
+            'road_count': len(road_shocks),
+            'baseline': float(baseline),
+            'shock_std': float(shock_std),
+            'shock_mean': float(shock_mean)
+        }
+    }
+    
+    # Log hasil filter
+    print(f"🔧 Filter Guncangan Kendaraan:")
+    print(f"   Total: {len(shocks)} → Kendaraan: {len(vehicle_shocks)}, Jalan: {len(road_shocks)}")
+    print(f"   Baseline: {baseline:.2f} m/s², Std: {shock_std:.2f} m/s²")
+    
+    return result
+
 def filter_vehicle_vibration(vibrations, timestamps=None):
     """
     Filter getaran kendaraan bermotor dari getaran jalan rusak
+    Untuk gyroscope dalam deg/s dengan filter untuk tanjakan/turunan
     
     Args:
-        vibrations (list): List getaran dalam m/s²
+        vibrations (list): List getaran dalam deg/s
         timestamps (list): List timestamp untuk analisis pola (optional)
     
     Returns:
@@ -104,34 +200,35 @@ def filter_vehicle_vibration(vibrations, timestamps=None):
         return {
             'filtered_vibrations': vibrations,
             'vehicle_vibrations': [],
+            'slope_vibrations': [],
             'road_vibrations': vibrations,
             'filter_applied': False,
             'stats': {
                 'total_count': len(vibrations),
                 'vehicle_count': 0,
+                'slope_count': 0,
                 'road_count': len(vibrations)
             }
         }
     
     # Konversi ke numpy array untuk analisis
-    vibs = np.array(vibrations)
+    vib_array = np.array(vibrations)
     
-    # === FILTER 1: BASELINE REMOVAL ===
-    # Hitung baseline getaran (getaran konstan kendaraan)
-    baseline = np.median(vibs)
+    # Hitung baseline getaran
+    baseline = np.median(vib_array)
     
-    # === FILTER 2: FREQUENCY ANALYSIS ===
-    # Hitung variasi getaran (getaran motor cenderung konsisten)
-    vibration_std = np.std(vibs)
-    vibration_mean = np.mean(vibs)
+    # Variasi getaran
+    vib_std = np.std(vib_array)
+    vib_mean = np.mean(vib_array)
     
-    # === FILTER 3: SPIKE DETECTION ===
-    # Deteksi lonjakan getaran yang tidak wajar (indikasi jalan rusak)
+    # Deteksi berbagai jenis getaran
     vehicle_vibrations = []
+    slope_vibrations = []
     road_vibrations = []
     
-    for i, vib in enumerate(vibs):
+    for i, vib in enumerate(vib_array):
         is_vehicle_vibration = False
+        is_slope_vibration = False
         
         # Kriteria 1: Getaran dalam range normal kendaraan
         if (VEHICLE_VIBRATION_FILTER['baseline_min'] <= vib <= VEHICLE_VIBRATION_FILTER['baseline_max']):
@@ -141,12 +238,28 @@ def filter_vehicle_vibration(vibrations, timestamps=None):
         if abs(vib - baseline) <= VEHICLE_VIBRATION_FILTER['baseline_tolerance']:
             is_vehicle_vibration = True
         
-        # Kriteria 3: Analisis pola jika ada data sekitar
-        if i > 0 and i < len(vibs) - 1:
-            prev_vib = vibs[i-1]
-            next_vib = vibs[i+1]
+        # Kriteria 3: Deteksi pola tanjakan/turunan (rotasi konstan dalam satu arah)
+        if i >= 2 and i < len(vib_array) - 2:
+            # Ambil 5 point sekitar untuk analisis tren
+            window = vib_array[i-2:i+3]
             
-            # Getaran motor cenderung gradual, bukan spike tiba-tiba
+            # Cek apakah ada tren konstan (tanjakan/turunan)
+            if len(window) >= 5:
+                # Hitung tren linear
+                trend = np.polyfit(range(len(window)), window, 1)[0]
+                
+                # Jika tren konstan dan dalam range slope
+                if abs(trend) <= VEHICLE_VIBRATION_FILTER['slope_trend_threshold']:
+                    # Cek apakah amplitudo dalam range slope
+                    if abs(vib) <= VEHICLE_VIBRATION_FILTER['slope_amplitude_threshold']:
+                        is_slope_vibration = True
+        
+        # Kriteria 4: Analisis gradien untuk getaran motor
+        if i > 0 and i < len(vib_array) - 1:
+            prev_vib = vib_array[i-1]
+            next_vib = vib_array[i+1]
+            
+            # Getaran motor cenderung gradual
             gradient_prev = abs(vib - prev_vib)
             gradient_next = abs(vib - next_vib)
             
@@ -154,36 +267,41 @@ def filter_vehicle_vibration(vibrations, timestamps=None):
                 gradient_next <= VEHICLE_VIBRATION_FILTER['max_gradient']):
                 is_vehicle_vibration = True
         
-        # Kriteria 4: Override untuk spike tinggi (pasti jalan rusak)
-        if vib >= VEHICLE_VIBRATION_FILTER['road_spike_threshold']:
+        # Kriteria 5: Override untuk spike tinggi (pasti jalan rusak)
+        if abs(vib) >= VEHICLE_VIBRATION_FILTER['road_spike_threshold']:
             is_vehicle_vibration = False
+            is_slope_vibration = False
         
         # Kategorikan getaran
-        if is_vehicle_vibration:
+        if is_slope_vibration:
+            slope_vibrations.append(vib)
+        elif is_vehicle_vibration:
             vehicle_vibrations.append(vib)
         else:
             road_vibrations.append(vib)
     
-    # === HASIL FILTER ===
+    # Hasil filter
     result = {
         'filtered_vibrations': road_vibrations,  # Hanya getaran jalan
         'vehicle_vibrations': vehicle_vibrations,  # Getaran kendaraan
+        'slope_vibrations': slope_vibrations,  # Getaran tanjakan/turunan
         'road_vibrations': road_vibrations,  # Getaran jalan rusak
         'filter_applied': True,
         'stats': {
             'total_count': len(vibrations),
             'vehicle_count': len(vehicle_vibrations),
+            'slope_count': len(slope_vibrations),
             'road_count': len(road_vibrations),
             'baseline': float(baseline),
-            'vibration_std': float(vibration_std),
-            'vibration_mean': float(vibration_mean)
+            'vib_std': float(vib_std),
+            'vib_mean': float(vib_mean)
         }
     }
     
     # Log hasil filter
-    print(f"🔧 Filter Getaran Kendaraan:")
-    print(f"   Total: {len(vibrations)} → Kendaraan: {len(vehicle_vibrations)}, Jalan: {len(road_vibrations)}")
-    print(f"   Baseline: {baseline:.2f} m/s², Std: {vibration_std:.2f} m/s²")
+    print(f"🔧 Filter Getaran Gyroscope:")
+    print(f"   Total: {len(vibrations)} → Kendaraan: {len(vehicle_vibrations)}, Slope: {len(slope_vibrations)}, Jalan: {len(road_vibrations)}")
+    print(f"   Baseline: {baseline:.2f} deg/s, Std: {vib_std:.2f} deg/s")
     
     return result
 
@@ -226,7 +344,7 @@ def send_to_thingsboard(payload_data, data_type="analysis"):
         return False
 
 def save_sensor_data(data):
-    """Menyimpan data sensor mentah ke database - UPDATED untuk vibration_magnitude"""
+    """Menyimpan data sensor mentah ke database - UPDATED untuk shock dan vibration"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -243,13 +361,13 @@ def save_sensor_data(data):
             accel_x_ms2, accel_y_ms2, accel_z_ms2, accel_magnitude_ms2,
             gyro_x, gyro_y, gyro_z, rotation_magnitude,
             gyro_x_dps, gyro_y_dps, gyro_z_dps, rotation_magnitude_dps,
-            vibration_magnitude,
+            shock_magnitude, vibration_magnitude,
             latitude, longitude, speed, satellites
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s
         )
         """
         
@@ -264,7 +382,7 @@ def save_sensor_data(data):
                 (data['gyroX']/131.0)**2 + (data['gyroY']/131.0)**2 + (data['gyroZ']/131.0)**2
             )
         
-        # Calculate converted magnitudes dari converted data jika ada
+        # Calculate converted magnitudes
         accel_magnitude_ms2 = None
         if all(data.get(key) is not None for key in ['accelX_ms2', 'accelY_ms2', 'accelZ_ms2']):
             accel_magnitude_ms2 = math.sqrt(
@@ -294,8 +412,9 @@ def save_sensor_data(data):
             data.get('gyroX'), data.get('gyroY'), data.get('gyroZ'), rotation_magnitude,
             # Converted gyroscope data (deg/s)
             data.get('gyroX_dps'), data.get('gyroY_dps'), data.get('gyroZ_dps'), rotation_magnitude_dps,
-            # Vibration magnitude from ESP32 (smoothed)
-            data.get('vibration_magnitude'),
+            # Shock & Vibration magnitude dari ESP32
+            data.get('shock_magnitude'),      # m/s² (dari accelerometer)
+            data.get('vibration_magnitude'),  # deg/s (dari gyroscope)
             # GPS data
             data.get('latitude'), data.get('longitude'), data.get('speed'), data.get('satellites')
         )
@@ -303,9 +422,10 @@ def save_sensor_data(data):
         cursor.execute(insert_query, insert_data)
         connection.commit()
         
+        shock_val = data.get('shock_magnitude', 0)
         vibration_val = data.get('vibration_magnitude', 0)
         print(f"✅ Raw sensor data saved to MySQL (ID: {cursor.lastrowid})")
-        print(f"📊 Vibration magnitude: {vibration_val:.2f} m/s² (ESP32 smoothed)")
+        print(f"📊 Shock: {shock_val:.2f} m/s², Vibration: {vibration_val:.2f} deg/s")
         return True
         
     except Error as e:
@@ -357,18 +477,66 @@ def analyze_surface_changes(data_points):
         'count': len(changes)
     }
 
+def analyze_shocks(data_points):
+    """Analisis guncangan dari shock_magnitude ESP32 (accelerometer)"""
+    shocks = []
+    
+    for data in data_points:
+        # Gunakan shock_magnitude dari ESP32 langsung
+        shock = data.get('shock_magnitude')
+        
+        if shock is not None and shock >= SHOCK_THRESHOLDS['light']:
+            shocks.append(shock)
+    
+    # Terapkan filter kendaraan pada data shock
+    if shocks:
+        filter_result = filter_vehicle_shock(shocks)
+        
+        # Gunakan guncangan yang sudah difilter (hanya guncangan jalan)
+        filtered_shocks = filter_result['filtered_shocks']
+        
+        return {
+            'shocks': filtered_shocks,
+            'max_shock': max(filtered_shocks) if filtered_shocks else 0,
+            'avg_shock': sum(filtered_shocks) / len(filtered_shocks) if filtered_shocks else 0,
+            'count': len(filtered_shocks),
+            'filter_info': {
+                'original_count': len(shocks),
+                'filtered_count': len(filtered_shocks),
+                'vehicle_count': filter_result['stats']['vehicle_count'],
+                'filter_applied': filter_result['filter_applied'],
+                'baseline': filter_result['stats'].get('baseline', 0),
+                'shock_std': filter_result['stats'].get('shock_std', 0)
+            }
+        }
+    
+    return {
+        'shocks': shocks,
+        'max_shock': max(shocks) if shocks else 0,
+        'avg_shock': sum(shocks) / len(shocks) if shocks else 0,
+        'count': len(shocks),
+        'filter_info': {
+            'original_count': 0,
+            'filtered_count': 0,
+            'vehicle_count': 0,
+            'filter_applied': False,
+            'baseline': 0,
+            'shock_std': 0
+        }
+    }
+
 def analyze_vibrations(data_points):
-    """Analisis guncangan dari vibration_magnitude ESP32 - UPDATED untuk konsistensi"""
+    """Analisis getaran dari vibration_magnitude ESP32 (gyroscope)"""
     vibrations = []
     
     for data in data_points:
-        # GUNAKAN vibration_magnitude dari ESP32 langsung (sudah smoothed)
+        # Gunakan vibration_magnitude dari ESP32 langsung
         vibration = data.get('vibration_magnitude')
         
-        if vibration is not None and vibration >= VIBRATION_THRESHOLDS['light']:
-            vibrations.append(vibration)
+        if vibration is not None and abs(vibration) >= VIBRATION_THRESHOLDS['light']:
+            vibrations.append(abs(vibration))
     
-    # === TERAPKAN FILTER KENDARAAN pada data ESP32 ===
+    # Terapkan filter kendaraan dan slope pada data vibration
     if vibrations:
         filter_result = filter_vehicle_vibration(vibrations)
         
@@ -376,18 +544,18 @@ def analyze_vibrations(data_points):
         filtered_vibrations = filter_result['filtered_vibrations']
         
         return {
-            'vibrations': filtered_vibrations,  # Hanya getaran jalan rusak
+            'vibrations': filtered_vibrations,
             'max_vibration': max(filtered_vibrations) if filtered_vibrations else 0,
             'avg_vibration': sum(filtered_vibrations) / len(filtered_vibrations) if filtered_vibrations else 0,
             'count': len(filtered_vibrations),
-            # Tambahan info filter
             'filter_info': {
                 'original_count': len(vibrations),
                 'filtered_count': len(filtered_vibrations),
                 'vehicle_count': filter_result['stats']['vehicle_count'],
+                'slope_count': filter_result['stats']['slope_count'],
                 'filter_applied': filter_result['filter_applied'],
                 'baseline': filter_result['stats'].get('baseline', 0),
-                'vibration_std': filter_result['stats'].get('vibration_std', 0)
+                'vib_std': filter_result['stats'].get('vib_std', 0)
             }
         }
     
@@ -400,59 +568,54 @@ def analyze_vibrations(data_points):
             'original_count': 0,
             'filtered_count': 0,
             'vehicle_count': 0,
+            'slope_count': 0,
             'filter_applied': False,
             'baseline': 0,
-            'vibration_std': 0
+            'vib_std': 0
         }
     }
 
-def analyze_rotations(data_points):
-    """Analisis rotasi berlebihan dari data gyroscope - UPDATED untuk deg/s"""
-    rotations = []
+def process_realtime_shock(data):
+    """Memproses guncangan real-time dari shock_magnitude ESP32"""
+    shock = data.get('shock_magnitude')
     
-    for data in data_points:
-        # Prioritas: gunakan data converted jika ada
-        rot_magnitude = None
+    if shock is not None:
+        # Terapkan filter guncangan kendaraan pada single data point
+        is_vehicle_shock = (
+            VEHICLE_SHOCK_FILTER['baseline_min'] <= shock <= VEHICLE_SHOCK_FILTER['baseline_max']
+        )
+        if shock >= VEHICLE_SHOCK_FILTER['road_spike_threshold']:
+            is_vehicle_shock = False
         
-        if data.get('rotation_magnitude_dps') is not None:
-            rot_magnitude = data['rotation_magnitude_dps']
-        elif all(key in data and data[key] is not None for key in ['gyroX_dps', 'gyroY_dps', 'gyroZ_dps']):
-            rot_magnitude = math.sqrt(
-                data['gyroX_dps']**2 + data['gyroY_dps']**2 + data['gyroZ_dps']**2
-            )
-        elif all(key in data and data[key] is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
-            # Fallback: konversi dari raw data
-            rotX = abs(data['gyroX'] / 131.0)
-            rotY = abs(data['gyroY'] / 131.0) 
-            rotZ = abs(data['gyroZ'] / 131.0)
-            rot_magnitude = math.sqrt(rotX**2 + rotY**2 + rotZ**2)
-        
-        if rot_magnitude is not None and rot_magnitude >= ROTATION_THRESHOLDS['normal']:
-            rotations.append(rot_magnitude)
-    
-    return {
-        'rotations': rotations,
-        'max_rotation': max(rotations) if rotations else 0,
-        'avg_rotation': sum(rotations) / len(rotations) if rotations else 0,
-        'count': len(rotations)
-    }
-    
+        if not is_vehicle_shock:
+            return {
+                'filtered_shock': shock,
+                'is_road_shock': True
+            }
+        else:
+            return {
+                'filtered_shock': 0,
+                'is_road_shock': False
+            }
+    return None
+
 def process_realtime_vibration(data):
     """Memproses getaran real-time dari vibration_magnitude ESP32"""
-    # Ambil vibration_magnitude langsung dari ESP32
     vibration = data.get('vibration_magnitude')
     
     if vibration is not None:
+        abs_vibration = abs(vibration)
+        
         # Terapkan filter getaran kendaraan pada single data point
         is_vehicle_vibration = (
-            VEHICLE_VIBRATION_FILTER['baseline_min'] <= vibration <= VEHICLE_VIBRATION_FILTER['baseline_max']
+            VEHICLE_VIBRATION_FILTER['baseline_min'] <= abs_vibration <= VEHICLE_VIBRATION_FILTER['baseline_max']
         )
-        if vibration >= VEHICLE_VIBRATION_FILTER['road_spike_threshold']:
+        if abs_vibration >= VEHICLE_VIBRATION_FILTER['road_spike_threshold']:
             is_vehicle_vibration = False
         
         if not is_vehicle_vibration:
             return {
-                'filtered_vibration': vibration,
+                'filtered_vibration': abs_vibration,
                 'is_road_vibration': True
             }
         else:
@@ -503,6 +666,15 @@ def detect_anomalies(data_points):
         })
     
     # Analisis guncangan (m/s²) - dengan filter kendaraan
+    shock_analysis = analyze_shocks(data_points)
+    if shock_analysis['count'] > 0:
+        anomalies.append({
+            'type': 'shock',
+            'details': shock_analysis,
+            'severity': get_shock_severity(shock_analysis['max_shock'])
+        })
+    
+    # Analisis getaran (deg/s) - dengan filter kendaraan dan slope
     vibration_analysis = analyze_vibrations(data_points)
     if vibration_analysis['count'] > 0:
         anomalies.append({
@@ -518,11 +690,10 @@ def create_analysis_visualization(analysis_data):
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
     # Buat time axis dalam detik (0-30 detik)
-    analysis_duration = 30  # Selalu 30 detik untuk analisis
+    analysis_duration = 30
     
     # 1. Data perubahan permukaan
     if analysis_data['surface_analysis']['changes']:
-        # Distribusikan data secara merata dalam 30 detik
         num_changes = len(analysis_data['surface_analysis']['changes'])
         time_points = [i * (analysis_duration / (num_changes - 1)) if num_changes > 1 else 0 
                       for i in range(num_changes)]
@@ -552,27 +723,26 @@ def create_analysis_visualization(analysis_data):
         ax1.set_xlim(0, 30)
         ax1.grid(True, alpha=0.3)
     
-    # 2. Data guncangan (UPDATED dengan info filter)
-    if analysis_data['vibration_analysis']['vibrations']:
-        # Distribusikan data secara merata dalam 30 detik
-        num_vibrations = len(analysis_data['vibration_analysis']['vibrations'])
-        time_points = [i * (analysis_duration / (num_vibrations - 1)) if num_vibrations > 1 else 0 
-                      for i in range(num_vibrations)]
+    # 2. Data guncangan (shock) - m/s²
+    if analysis_data['shock_analysis']['shocks']:
+        num_shocks = len(analysis_data['shock_analysis']['shocks'])
+        time_points = [i * (analysis_duration / (num_shocks - 1)) if num_shocks > 1 else 0 
+                      for i in range(num_shocks)]
         
-        ax2.plot(time_points, analysis_data['vibration_analysis']['vibrations'], 
+        ax2.plot(time_points, analysis_data['shock_analysis']['shocks'], 
                 marker='s', linewidth=2, markersize=4, color='red', alpha=0.8)
-        ax2.axhline(y=analysis_data['vibration_analysis']['max_vibration'], 
+        ax2.axhline(y=analysis_data['shock_analysis']['max_shock'], 
                    color='darkred', linestyle='--', alpha=0.7,
-                   label=f'Max: {analysis_data["vibration_analysis"]["max_vibration"]:.1f}m/s²')
-        ax2.axhline(y=analysis_data['vibration_analysis']['avg_vibration'], 
+                   label=f'Max: {analysis_data["shock_analysis"]["max_shock"]:.1f}m/s²')
+        ax2.axhline(y=analysis_data['shock_analysis']['avg_shock'], 
                    color='blue', linestyle=':', alpha=0.7,
-                   label=f'Avg: {analysis_data["vibration_analysis"]["avg_vibration"]:.1f}m/s²')
+                   label=f'Avg: {analysis_data["shock_analysis"]["avg_shock"]:.1f}m/s²')
         
-        ax2.fill_between(time_points, analysis_data['vibration_analysis']['vibrations'], 
+        ax2.fill_between(time_points, analysis_data['shock_analysis']['shocks'], 
                         alpha=0.3, color='red')
         
         # Tambahkan info filter
-        filter_info = analysis_data['vibration_analysis'].get('filter_info', {})
+        filter_info = analysis_data['shock_analysis'].get('filter_info', {})
         title = f'Guncangan Jalan (Filtered: {filter_info.get("filtered_count", 0)}/{filter_info.get("original_count", 0)})'
         ax2.set_title(title)
         ax2.set_xlabel('Waktu (detik)')
@@ -588,56 +758,63 @@ def create_analysis_visualization(analysis_data):
         ax2.set_xlim(0, 30)
         ax2.grid(True, alpha=0.3)
     
-    # 3. Info lokasi dan panjang kerusakan
-    info_text = f"Panjang Kerusakan: {analysis_data['damage_length']:.1f} meter\n\n"
-    info_text += f"Lokasi Awal:\n"
+    # 3. Data getaran (vibration) - deg/s
+    if analysis_data['vibration_analysis']['vibrations']:
+        num_vibrations = len(analysis_data['vibration_analysis']['vibrations'])
+        time_points = [i * (analysis_duration / (num_vibrations - 1)) if num_vibrations > 1 else 0 
+                      for i in range(num_vibrations)]
+        
+        ax3.plot(time_points, analysis_data['vibration_analysis']['vibrations'], 
+                marker='^', linewidth=2, markersize=4, color='purple', alpha=0.8)
+        ax3.axhline(y=analysis_data['vibration_analysis']['max_vibration'], 
+                   color='darkmagenta', linestyle='--', alpha=0.7,
+                   label=f'Max: {analysis_data["vibration_analysis"]["max_vibration"]:.1f}deg/s')
+        ax3.axhline(y=analysis_data['vibration_analysis']['avg_vibration'], 
+                   color='blue', linestyle=':', alpha=0.7,
+                   label=f'Avg: {analysis_data["vibration_analysis"]["avg_vibration"]:.1f}deg/s')
+        
+        ax3.fill_between(time_points, analysis_data['vibration_analysis']['vibrations'], 
+                        alpha=0.3, color='purple')
+        
+        # Tambahkan info filter
+        filter_info = analysis_data['vibration_analysis'].get('filter_info', {})
+        title = f'Getaran Jalan (Filtered: {filter_info.get("filtered_count", 0)}/{filter_info.get("original_count", 0)})'
+        ax3.set_title(title)
+        ax3.set_xlabel('Waktu (detik)')
+        ax3.set_ylabel('Getaran (deg/s)')
+        ax3.set_xlim(0, 30)
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    else:
+        ax3.text(0.5, 0.5, 'Tidak ada getaran\njalan rusak terdeteksi', 
+                ha='center', va='center', transform=ax3.transAxes, fontsize=14)
+        ax3.set_title('Getaran Jalan (Filtered)')
+        ax3.set_xlabel('Waktu (detik)')
+        ax3.set_xlim(0, 30)
+        ax3.grid(True, alpha=0.3)
+    
+    # 4. Info lokasi dan klasifikasi
+    info_text = f"KLASIFIKASI KERUSAKAN:\n"
+    info_text += f"   {analysis_data['damage_classification'].upper().replace('_', ' ')}\n\n"
+    
+    info_text += f"PANJANG KERUSAKAN:\n"
+    info_text += f"   {analysis_data['damage_length']:.1f} meter\n\n"
+    
+    info_text += f"PARAMETER UTAMA:\n"
+    info_text += f"   Surface: {analysis_data['surface_analysis']['max_change']:.1f}cm\n"
+    info_text += f"   Shock: {analysis_data['shock_analysis']['max_shock']:.1f}m/s²\n"
+    info_text += f"   Vibration: {analysis_data['vibration_analysis']['max_vibration']:.1f}deg/s\n\n"
+    
+    # Tambahkan info lokasi
     if analysis_data['start_location']:
+        info_text += f"LOKASI AWAL:\n"
         info_text += f"   Lat: {analysis_data['start_location'][0]:.6f}\n"
         info_text += f"   Lng: {analysis_data['start_location'][1]:.6f}\n\n"
-    else:
-        info_text += f"   GPS tidak tersedia\n\n"
     
-    info_text += f"Lokasi Akhir:\n"
     if analysis_data['end_location']:
+        info_text += f"LOKASI AKHIR:\n"
         info_text += f"   Lat: {analysis_data['end_location'][0]:.6f}\n"
         info_text += f"   Lng: {analysis_data['end_location'][1]:.6f}"
-    else:
-        info_text += f"   GPS tidak tersedia"
-    
-    # Tambahkan info filter getaran
-    filter_info = analysis_data['vibration_analysis'].get('filter_info', {})
-    if filter_info.get('filter_applied', False):
-        info_text += f"\n\nFilter Getaran:\n"
-        info_text += f"   Total: {filter_info.get('original_count', 0)}\n"
-        info_text += f"   Kendaraan: {filter_info.get('vehicle_count', 0)}\n"
-        info_text += f"   Jalan: {filter_info.get('filtered_count', 0)}"
-    
-    ax3.text(0.05, 0.95, info_text, ha='left', va='top', transform=ax3.transAxes, 
-            fontsize=10, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.7))
-    ax3.set_title('Info Kerusakan Jalan')
-    ax3.axis('off')
-    
-    # 4. Klasifikasi dan anomali
-    classification_text = f"KLASIFIKASI KERUSAKAN:\n"
-    classification_text += f"   {analysis_data['damage_classification'].upper().replace('_', ' ')}\n\n"
-    
-    classification_text += f"ANOMALI TERDETEKSI:\n"
-    for anomaly in analysis_data['anomalies']:
-        if anomaly['type'] == 'vibration':
-            classification_text += f"• {anomaly['type'].replace('_', ' ').title()}: {anomaly['severity']} (filtered)\n"
-        else:
-            classification_text += f"• {anomaly['type'].replace('_', ' ').title()}: {anomaly['severity']}\n"
-    
-    if not analysis_data['anomalies']:
-        classification_text += "• Tidak ada anomali signifikan\n"
-    
-    # Tambahkan info filter
-    filter_info = analysis_data['vibration_analysis'].get('filter_info', {})
-    if filter_info.get('filter_applied', False):
-        classification_text += f"\nFILTER GETARAN:\n"
-        classification_text += f"• Original: {filter_info.get('original_count', 0)} getaran\n"
-        classification_text += f"• Kendaraan: {filter_info.get('vehicle_count', 0)} (diabaikan)\n"
-        classification_text += f"• Jalan: {filter_info.get('filtered_count', 0)} (dianalisis)"
     
     # Color based on classification
     color_map = {
@@ -647,9 +824,9 @@ def create_analysis_visualization(analysis_data):
     }
     bg_color = color_map.get(analysis_data['damage_classification'], 'lightgray')
     
-    ax4.text(0.05, 0.95, classification_text, ha='left', va='top', transform=ax4.transAxes, 
+    ax4.text(0.05, 0.95, info_text, ha='left', va='top', transform=ax4.transAxes, 
             fontsize=9, bbox=dict(boxstyle="round,pad=0.5", facecolor=bg_color, alpha=0.8))
-    ax4.set_title('Klasifikasi Kerusakan')
+    ax4.set_title('Info Kerusakan (3 Parameter)')
     ax4.axis('off')
     
     plt.tight_layout()
@@ -664,7 +841,7 @@ def create_analysis_visualization(analysis_data):
     return filepath, filename
 
 def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
-    """Menyimpan hasil analisis ke database - HANYA JIKA ADA KERUSAKAN"""
+    """Menyimpan hasil analisis ke database - UPDATED untuk 3 parameter"""
     
     # Cek apakah ada kerusakan
     if not analysis_data.get('has_damage', False):
@@ -688,11 +865,13 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
         insert_query = """
         INSERT INTO road_damage_analysis (
             analysis_timestamp, start_latitude, start_longitude, end_latitude, end_longitude,
-            damage_classification, damage_length, surface_change_max, surface_change_avg, surface_change_count,
-            vibration_max, vibration_avg, vibration_count, anomalies,
-            analysis_image, image_filename
+            damage_classification, damage_length, 
+            surface_change_max, surface_change_avg, surface_change_count,
+            shock_max, shock_avg, shock_count,
+            vibration_max, vibration_avg, vibration_count,
+            anomalies, analysis_image, image_filename
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """
         
@@ -709,8 +888,11 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             analysis_data['surface_analysis']['max_change'],
             analysis_data['surface_analysis']['avg_change'],
             analysis_data['surface_analysis']['count'],
-            analysis_data['vibration_analysis']['max_vibration'],  # Sekarang dalam m/s² dan sudah difilter
-            analysis_data['vibration_analysis']['avg_vibration'],  # Sekarang dalam m/s² dan sudah difilter
+            analysis_data['shock_analysis']['max_shock'],
+            analysis_data['shock_analysis']['avg_shock'],
+            analysis_data['shock_analysis']['count'],
+            analysis_data['vibration_analysis']['max_vibration'],
+            analysis_data['vibration_analysis']['avg_vibration'],
             analysis_data['vibration_analysis']['count'],
             json.dumps(analysis_data['anomalies']),
             image_data,
@@ -721,12 +903,11 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
         connection.commit()
         
         analysis_id = cursor.lastrowid
-        filter_info = analysis_data['vibration_analysis'].get('filter_info', {})
         
         print(f"✅ Kerusakan berhasil disimpan ke MySQL: {analysis_data['damage_classification']} (ID: {analysis_id})")
-        print(f"📊 Vibration max: {analysis_data['vibration_analysis']['max_vibration']:.2f} m/s² (filtered)")
-        if filter_info.get('filter_applied', False):
-            print(f"🔧 Filter: {filter_info.get('original_count', 0)} → {filter_info.get('filtered_count', 0)} getaran")
+        print(f"📊 Surface: {analysis_data['surface_analysis']['max_change']:.2f}cm")
+        print(f"📊 Shock: {analysis_data['shock_analysis']['max_shock']:.2f}m/s² (filtered)")
+        print(f"📊 Vibration: {analysis_data['vibration_analysis']['max_vibration']:.2f}deg/s (filtered)")
         
         # Send to ThingsBoard dengan gambar dalam thread terpisah
         threading.Thread(
@@ -746,7 +927,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             connection.close()
 
 def perform_30s_analysis():
-    """Melakukan analisis komprehensif setiap 30 detik dengan filter getaran kendaraan"""
+    """Melakukan analisis komprehensif setiap 30 detik dengan 3 parameter"""
     global last_analysis_time
     
     current_time = time.time()
@@ -757,14 +938,14 @@ def perform_30s_analysis():
         return
     
     print(f"🔍 Memulai analisis 30 detik dengan {len(data_points)} data points...")
-    print(f"📊 Menggunakan data GY-521 dengan filter getaran kendaraan")
+    print(f"📊 Menggunakan 3 parameter: Surface + Shock + Vibration")
     
     start_time = time.time()
     
-    # Analisis berbagai aspek dengan filter getaran
+    # Analisis berbagai aspek dengan filter
     surface_analysis = analyze_surface_changes(data_points)
-    vibration_analysis = analyze_vibrations(data_points)  # Sekarang dengan filter kendaraan
-    rotation_analysis = analyze_rotations(data_points)    # Dalam deg/s tapi tidak digunakan
+    shock_analysis = analyze_shocks(data_points)        # m/s² dengan filter
+    vibration_analysis = analyze_vibrations(data_points) # deg/s dengan filter
     anomalies = detect_anomalies(data_points)
     
     # Tentukan lokasi awal dan akhir
@@ -777,28 +958,21 @@ def perform_30s_analysis():
                 start_location = (data['latitude'], data['longitude'])
             end_location = (data['latitude'], data['longitude'])
     
-    # === KLASIFIKASI DENGAN GETARAN YANG SUDAH DIFILTER ===
+    # Klasifikasi dengan 3 parameter
     max_surface_change = surface_analysis['max_change']
-    max_vibration = vibration_analysis['max_vibration']  # Sudah difilter dari getaran kendaraan
-    max_rotation = rotation_analysis['max_rotation']     # Tidak digunakan
+    max_shock = shock_analysis['max_shock']
+    max_vibration = vibration_analysis['max_vibration']
     
-    # Gunakan fungsi klasifikasi dengan getaran yang sudah difilter
-    damage_classification = classify_damage_or_logic(max_surface_change, max_vibration, max_rotation)
+    damage_classification = classify_damage_three_params(max_surface_change, max_shock, max_vibration)
     
-    # Hanya hitung panjang kerusakan jika ada kerusakan
+    # Hitung panjang kerusakan jika ada kerusakan
     has_damage = damage_classification != 'baik'
     damage_length = calculate_damage_length(data_points, has_damage)
     
-    # Info filter getaran
-    filter_info = vibration_analysis.get('filter_info', {})
-    
-    print(f"📊 Parameter Klasifikasi (dengan Filter Getaran):")
-    print(f"   - Perubahan Permukaan Max: {max_surface_change:.2f} cm")
-    print(f"   - Getaran Max: {max_vibration:.2f} m/s² (FILTERED)")
-    if filter_info.get('filter_applied', False):
-        print(f"   - Filter Getaran: {filter_info.get('original_count', 0)} → {filter_info.get('filtered_count', 0)} getaran")
-        print(f"   - Baseline Kendaraan: {filter_info.get('baseline', 0):.2f} m/s²")
-    print(f"   - Rotasi Max: {max_rotation:.0f} deg/s (TIDAK DIGUNAKAN)")
+    print(f"📊 Parameter Klasifikasi (3 Parameter dengan Filter):")
+    print(f"   - Surface Change Max: {max_surface_change:.2f} cm")
+    print(f"   - Shock Max: {max_shock:.2f} m/s² (FILTERED)")
+    print(f"   - Vibration Max: {max_vibration:.2f} deg/s (FILTERED)")
     print(f"   - Hasil Klasifikasi: {damage_classification.upper().replace('_', ' ')}")
     print(f"   - Panjang Kerusakan: {damage_length:.1f}m")
     
@@ -809,8 +983,8 @@ def perform_30s_analysis():
         # Compile analysis data
         analysis_data = {
             'surface_analysis': surface_analysis,
-            'vibration_analysis': vibration_analysis,  # Sudah termasuk info filter
-            'rotation_analysis': rotation_analysis,
+            'shock_analysis': shock_analysis,
+            'vibration_analysis': vibration_analysis,
             'damage_length': damage_length,
             'anomalies': anomalies,
             'damage_classification': damage_classification,
@@ -832,11 +1006,8 @@ def perform_30s_analysis():
         # Simpan ke database dan kirim ke ThingsBoard
         try:
             save_analysis_to_database(analysis_data, image_path, image_filename)
-            
             print(f"✅ Analisis kerusakan tersimpan - Klasifikasi: {damage_classification}")
             print(f"📏 Panjang kerusakan: {damage_length:.1f}m")
-            print(f"📊 Vibration: {max_vibration:.2f} m/s² (filtered from vehicle)")
-            print(f"⚠️ Anomali: {len(anomalies)}")
             print(f"💾 Data dikirim ke MySQL dan ThingsBoard")
             
         except Exception as e:
@@ -845,29 +1016,20 @@ def perform_30s_analysis():
     else:
         print(f"✅ JALAN DALAM KONDISI BAIK - Tidak ada data yang disimpan")
         print(f"💡 Resource saved: No MySQL insert, no ThingsBoard data, no image generated")
-        print(f"📊 Threshold tidak terpenuhi: Surface={max_surface_change:.1f}cm, Vibration={max_vibration:.1f}m/s²")
-        if filter_info.get('filter_applied', False):
-            print(f"🔧 Filter berhasil: {filter_info.get('vehicle_count', 0)} getaran kendaraan diabaikan")
+        print(f"📊 Threshold tidak terpenuhi untuk ketiga parameter")
     
     last_analysis_time = current_time
 
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
-    """Endpoint untuk menerima data sensor dari ESP32 - UPDATED dengan filter getaran"""
+    """Endpoint untuk menerima data sensor dari ESP32 - UPDATED dengan 3 parameter"""
     global last_analysis_time
     
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data received"}), 400
     
-    # Debug: log jenis data yang diterima
-    data_types = []
-    if 'accel_magnitude_ms2' in data:
-        data_types.append("converted m/s²")
-    if 'accelX' in data:
-        data_types.append("raw LSB")
-    
-    print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')} - Types: {', '.join(data_types)}")
+    print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
     
     # Simpan data mentah ke database
     save_sensor_data(data)
@@ -875,18 +1037,29 @@ def multisensor():
     # Tambahkan ke buffer untuk analisis
     data_buffer.add_data(data)
     
-    # Proses getaran real-time
+    # Proses shock dan vibration real-time
+    shock_result = process_realtime_shock(data)
     vibration_result = process_realtime_vibration(data)
+    
+    # Kirim payload real-time ke ThingsBoard
+    realtime_payload = {}
+    
+    if shock_result and shock_result['is_road_shock']:
+        realtime_payload["fls_realtime_shock_ms2"] = shock_result['filtered_shock']
+        print(f"📡 Shock real-time: {shock_result['filtered_shock']:.2f} m/s²")
+    
     if vibration_result and vibration_result['is_road_vibration']:
-        # Kirim payload getaran real-time ke ThingsBoard
-        realtime_payload = {
-            "fls_realtime_vibration_ms2": vibration_result['filtered_vibration'],
+        realtime_payload["fls_realtime_vibration_dps"] = vibration_result['filtered_vibration']
+        print(f"📡 Vibration real-time: {vibration_result['filtered_vibration']:.2f} deg/s")
+    
+    if realtime_payload:
+        realtime_payload.update({
             "fls_timestamp": datetime.now().isoformat(),
-            "fls_data_type": "realtime_vibration",
+            "fls_data_type": "realtime_3param",
+            "fls_shock_filter_enabled": True,
             "fls_vibration_filter_enabled": True
-        }
-        send_to_thingsboard(realtime_payload, "realtime_vibration")
-        print(f"📡 Mengirim getaran real-time: {vibration_result['filtered_vibration']:.2f} m/s²")
+        })
+        send_to_thingsboard(realtime_payload, "realtime_3param")
     
     # Cek apakah sudah waktunya untuk analisis 30 detik
     current_time = time.time()
@@ -898,16 +1071,16 @@ def multisensor():
     
     return jsonify({
         "status": "success",
-        "message": "Data processed successfully (vibration filter enabled)",
+        "message": "Data processed successfully (3 parameters with filters)",
         "timestamp": datetime.now().isoformat(),
         "data_buffer_count": data_buffer.get_data_count(),
-        "conversion_status": "m/s² ready" if 'accel_magnitude_ms2' in data else "raw data received",
-        "vibration_filter": "enabled"
+        "parameters": "surface + shock + vibration",
+        "filters": "shock & vibration filters enabled"
     }), 200
 
 @app.route('/status', methods=['GET'])
 def status():
-    """Endpoint untuk cek status sistem - UPDATED dengan info filter getaran"""
+    """Endpoint untuk cek status sistem - UPDATED dengan 3 parameter"""
     data_points = data_buffer.get_data()
     
     # Analisis data terbaru
@@ -920,19 +1093,17 @@ def status():
     ultrasonic_active = sum(1 for i in range(1, 9) 
                            if latest_data.get(f'sensor{i}') not in [None, -1])
     
-    # Status motion sensor (check both raw and converted)
+    # Status motion sensor
     motion_status = "inactive"
     if any(latest_data.get(key) is not None for key in ['accelX', 'accelY', 'accelZ']):
-        motion_status = "active (raw)"
-    if any(latest_data.get(key) is not None for key in ['accelX_ms2', 'accelY_ms2', 'accelZ_ms2']):
-        motion_status = "active (converted m/s²)"
+        motion_status = "active (shock + vibration)"
     
     # Test ThingsBoard connection
     test_payload = {
         "system_status": "testing", 
         "test_timestamp": datetime.now().isoformat(),
-        "conversion_support": "m/s² enabled",
-        "vibration_filter": "enabled"
+        "parameters": "3 (surface + shock + vibration)",
+        "filters": "shock & vibration filters enabled"
     }
     thingsboard_status = "connected" if send_to_thingsboard(test_payload, "status_check") else "disconnected"
     
@@ -953,25 +1124,19 @@ def status():
             "thingsboard_status": thingsboard_status,
             "thingsboard_url": THINGSBOARD_URL
         },
-        "conversion_support": {
-            "accelerometer": "m/s² (converted from LSB)",
-            "gyroscope": "deg/s (converted from LSB)",
-            "vibration_threshold": f"{VIBRATION_THRESHOLDS} m/s²",
-            "classification_logic": "AND (Surface + Vibration)",
-            "vibration_filter": "enabled (vehicle vibration filtered out)"
-        },
-        "vibration_filter": {
-            "enabled": True,
-            "baseline_range": f"{VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} m/s²",
-            "spike_threshold": f"{VEHICLE_VIBRATION_FILTER['road_spike_threshold']} m/s²",
-            "description": "Filters out consistent vehicle vibrations, keeps road damage spikes"
+        "parameters": {
+            "surface_change": "cm (ultrasonic)",
+            "shock": "m/s² (accelerometer filtered)",
+            "vibration": "deg/s (gyroscope filtered)",
+            "classification_logic": "3 parameters with threshold",
+            "filters": "vehicle & slope filters enabled"
         },
         "last_analysis": datetime.fromtimestamp(last_analysis_time).isoformat() if last_analysis_time > 0 else "Never",
         "next_analysis_in": max(0, ANALYSIS_INTERVAL - (time.time() - last_analysis_time))
     })
 
 def send_analysis_with_image_to_thingsboard(analysis_id):
-    """Kirim data analisis beserta gambar ke ThingsBoard dengan info filter"""
+    """Kirim data analisis beserta gambar ke ThingsBoard dengan 3 parameter"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -992,10 +1157,11 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
             return False
         
         print(f"🔍 Processing analysis ID {analysis_id}")
-        print(f"📊 Has image: {result['analysis_image'] is not None}")
-        print(f"📊 Vibration data (filtered): {result['vibration_max']:.2f} max, {result['vibration_avg']:.2f} avg")
+        print(f"📊 Surface: {result['surface_change_max']:.2f}cm")
+        print(f"📊 Shock: {result['shock_max']:.2f}m/s² (filtered)")
+        print(f"📊 Vibration: {result['vibration_max']:.2f}deg/s (filtered)")
         
-        # Buat payload lengkap dengan image
+        # Buat payload lengkap dengan 3 parameter
         thingsboard_payload = {
             "analysis_id": result['id'],
             "analysis_timestamp": result['analysis_timestamp'].isoformat() if result['analysis_timestamp'] else None,
@@ -1004,12 +1170,16 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
             "surface_change_max": float(result['surface_change_max']) if result['surface_change_max'] else 0,
             "surface_change_avg": float(result['surface_change_avg']) if result['surface_change_avg'] else 0,
             "surface_change_count": int(result['surface_change_count']) if result['surface_change_count'] else 0,
-            "vibration_max_ms2": float(result['vibration_max']) if result['vibration_max'] else 0,  # m/s² filtered
-            "vibration_avg_ms2": float(result['vibration_avg']) if result['vibration_avg'] else 0,  # m/s² filtered
+            "shock_max_ms2": float(result['shock_max']) if result['shock_max'] else 0,
+            "shock_avg_ms2": float(result['shock_avg']) if result['shock_avg'] else 0,
+            "shock_count": int(result['shock_count']) if result['shock_count'] else 0,
+            "vibration_max_dps": float(result['vibration_max']) if result['vibration_max'] else 0,
+            "vibration_avg_dps": float(result['vibration_avg']) if result['vibration_avg'] else 0,
             "vibration_count": int(result['vibration_count']) if result['vibration_count'] else 0,
             "damage_detected": True,
-            "vibration_unit": "m/s² (filtered)",
-            "vibration_filter_enabled": True
+            "parameters": "3 (surface + shock + vibration)",
+            "shock_unit": "m/s² (filtered)",
+            "vibration_unit": "deg/s (filtered)"
         }
         
         # Add location if available
@@ -1025,14 +1195,11 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
         if result['analysis_image']:
             image_data = result['analysis_image']
             
-            # Validasi format base64
             try:
                 import base64
                 test_decode = base64.b64decode(image_data[:100])
-                print(f"✅ Base64 validation: PASSED")
                 
-                if len(image_data) > 200000:  # 200KB limit
-                    print(f"⚠️ Image data sangat besar ({len(image_data)} chars), akan dipotong")
+                if len(image_data) > 200000:
                     thingsboard_payload["analysis_image_base64"] = image_data[:100000] + "...truncated"
                     thingsboard_payload["has_image"] = True
                     thingsboard_payload["image_truncated"] = True
@@ -1049,8 +1216,8 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
             thingsboard_payload["has_image"] = False
         
         # Send to ThingsBoard
-        if send_to_thingsboard(thingsboard_payload, "road_damage_filtered_vibration"):
-            print(f"✅ Data lengkap dengan gambar terkirim ke ThingsBoard (ID: {analysis_id}) - Filtered vibration")
+        if send_to_thingsboard(thingsboard_payload, "road_damage_3param"):
+            print(f"✅ Data lengkap dengan gambar terkirim ke ThingsBoard (ID: {analysis_id}) - 3 parameters")
             return True
         else:
             print(f"❌ Gagal mengirim data lengkap ke ThingsBoard (ID: {analysis_id})")
@@ -1066,7 +1233,7 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
 
 @app.route('/analysis', methods=['GET'])
 def get_analysis():
-    """Endpoint untuk mengambil data analisis dari database"""
+    """Endpoint untuk mengambil data analisis dari database - UPDATED 3 parameter"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
@@ -1109,17 +1276,19 @@ def get_analysis():
                     analysis['anomalies'] = []
             
             # Add unit information
-            analysis['vibration_unit'] = 'm/s² (filtered)'
             analysis['surface_unit'] = 'cm'
+            analysis['shock_unit'] = 'm/s² (filtered)'
+            analysis['vibration_unit'] = 'deg/s (filtered)'
         
         return jsonify({
             "total": total_count,
             "count": len(analyses),
             "analyses": analyses,
-            "conversion_info": {
-                "vibration_unit": "m/s² (filtered)",
+            "parameters_info": {
                 "surface_unit": "cm",
-                "note": "Vibration data filtered to remove vehicle vibrations"
+                "shock_unit": "m/s² (filtered)",
+                "vibration_unit": "deg/s (filtered)",
+                "note": "3 parameters with vehicle & slope filters"
             }
         })
         
@@ -1133,7 +1302,7 @@ def get_analysis():
 
 @app.route('/summary', methods=['GET'])
 def get_summary():
-    """Endpoint untuk mendapatkan ringkasan data kerusakan jalan"""
+    """Endpoint untuk mendapatkan ringkasan data kerusakan jalan - UPDATED 3 parameter"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
@@ -1149,8 +1318,10 @@ def get_summary():
             AVG(damage_length) as avg_length,
             SUM(damage_length) as total_length,
             MAX(surface_change_max) as max_surface_change,
-            MAX(vibration_max) as max_vibration_ms2,
-            AVG(vibration_max) as avg_vibration_ms2
+            MAX(shock_max) as max_shock_ms2,
+            AVG(shock_max) as avg_shock_ms2,
+            MAX(vibration_max) as max_vibration_dps,
+            AVG(vibration_max) as avg_vibration_dps
         FROM road_damage_analysis 
         GROUP BY damage_classification
         """
@@ -1162,7 +1333,7 @@ def get_summary():
         recent_query = """
         SELECT analysis_timestamp, damage_classification, damage_length, 
                start_latitude, start_longitude, end_latitude, end_longitude,
-               vibration_max, vibration_avg
+               surface_change_max, shock_max, vibration_max
         FROM road_damage_analysis 
         ORDER BY analysis_timestamp DESC 
         LIMIT 10
@@ -1176,11 +1347,12 @@ def get_summary():
             "recent_activity": recent,
             "timestamp": datetime.now().isoformat(),
             "units": {
-                "vibration": "m/s² (filtered)",
                 "surface_change": "cm",
+                "shock": "m/s² (filtered)",
+                "vibration": "deg/s (filtered)",
                 "damage_length": "meters"
             },
-            "conversion_note": "All vibration data is filtered to remove vehicle vibrations"
+            "parameters_note": "3 parameters: surface + shock + vibration with filters"
         })
         
     except Error as e:
@@ -1191,131 +1363,65 @@ def get_summary():
             cursor.close()
             connection.close()
 
-@app.route('/debug/analysis/<int:analysis_id>', methods=['GET'])
-def debug_analysis_data(analysis_id):
-    """Debug endpoint untuk cek data analisis"""
-    connection = get_db_connection()
-    if not connection:
-        return jsonify({"error": "Database connection failed"}), 500
+@app.route('/debug/filters/test', methods=['GET'])
+def debug_filters_test():
+    """Debug endpoint untuk test filter shock dan vibration"""
+    # Test data shock
+    test_shocks = [
+        1.5, 2.1, 1.8, 2.0, 1.9,  # Shock kendaraan normal
+        28.5, 32.2, 27.8,          # Shock jalan rusak
+        2.2, 1.7, 2.3, 1.6,        # Shock kendaraan lagi
+        45.1, 52.3, 41.8,          # Shock jalan rusak parah
+        2.0, 1.9, 2.1               # Shock kendaraan
+    ]
     
-    try:
-        cursor = connection.cursor(dictionary=True)
-        
-        query = """
-        SELECT id, analysis_timestamp, damage_classification, 
-               damage_length, analysis_image IS NOT NULL as has_image_in_db,
-               LENGTH(analysis_image) as image_size,
-               image_filename, vibration_max, vibration_avg, vibration_count
-        FROM road_damage_analysis 
-        WHERE id = %s
-        """
-        
-        cursor.execute(query, (analysis_id,))
-        result = cursor.fetchone()
-        
-        if not result:
-            return jsonify({"error": f"Analysis ID {analysis_id} not found"}), 404
-        
-        return jsonify({
-            "analysis_id": result['id'],
-            "damage_classification": result['damage_classification'],
-            "damage_length": result['damage_length'],
-            "vibration_data": {
-                "max": result['vibration_max'],
-                "avg": result['vibration_avg'],
-                "count": result['vibration_count'],
-                "unit": "m/s² (filtered)"
-            },
-            "has_image_in_database": result['has_image_in_db'],
-            "image_size_bytes": result['image_size'],
-            "image_filename": result['image_filename'],
-            "timestamp": result['analysis_timestamp'].isoformat() if result['analysis_timestamp'] else None
-        })
-        
-    except Error as e:
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
-@app.route('/debug/thingsboard/resend/<int:analysis_id>', methods=['POST'])
-def debug_resend_to_thingsboard(analysis_id):
-    """Debug endpoint untuk mengirim ulang data ke ThingsBoard"""
-    try:
-        success = send_analysis_with_image_to_thingsboard(analysis_id)
-        
-        return jsonify({
-            "success": success,
-            "message": f"Resend to ThingsBoard {'successful' if success else 'failed'} (filtered vibration)",
-            "analysis_id": analysis_id
-        })
-        
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "analysis_id": analysis_id
-        }), 500
-
-@app.route('/analysis/<int:analysis_id>/image', methods=['GET'])
-def get_analysis_image_endpoint(analysis_id):
-    """Endpoint untuk mendapatkan gambar analisis berdasarkan ID"""
-    connection = get_db_connection()
-    if not connection:
-        return "Database connection failed", 500
+    # Test data vibration
+    test_vibrations = [
+        50, 45, 55, 48, 52,         # Vibration kendaraan normal
+        150, 180, 165,              # Vibration jalan rusak
+        60, 55, 58, 62,             # Vibration kendaraan lagi
+        220, 250, 210,              # Vibration jalan rusak parah
+        48, 52, 49                  # Vibration kendaraan
+    ]
     
-    try:
-        cursor = connection.cursor(dictionary=True)
-        
-        query = """
-        SELECT analysis_image, damage_classification, analysis_timestamp, image_filename
-        FROM road_damage_analysis 
-        WHERE id = %s
-        """
-        
-        cursor.execute(query, (analysis_id,))
-        result = cursor.fetchone()
-        
-        if not result or not result['analysis_image']:
-            return "Image not found", 404
-        
-        # Decode base64 image
-        from flask import Response
-        import base64
-        
-        image_data = base64.b64decode(result['analysis_image'])
-        
-        filename = result['image_filename'] or f'analysis_{analysis_id}.png'
-        
-        return Response(
-            image_data,
-            mimetype='image/png',
-            headers={
-                'Content-Disposition': f'inline; filename={filename}',
-                'Cache-Control': 'public, max-age=3600',
-                'Content-Type': 'image/png'
+    # Terapkan filter
+    shock_filter_result = filter_vehicle_shock(test_shocks)
+    vibration_filter_result = filter_vehicle_vibration(test_vibrations)
+    
+    return jsonify({
+        "shock_test": {
+            "original_data": test_shocks,
+            "filter_result": shock_filter_result,
+            "filter_parameters": {
+                "baseline_range": f"{VEHICLE_SHOCK_FILTER['baseline_min']}-{VEHICLE_SHOCK_FILTER['baseline_max']} m/s²",
+                "tolerance": f"{VEHICLE_SHOCK_FILTER['baseline_tolerance']} m/s²",
+                "spike_threshold": f"{VEHICLE_SHOCK_FILTER['road_spike_threshold']} m/s²"
             }
-        )
-        
-    except Exception as e:
-        return f"Error: {str(e)}", 500
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+        },
+        "vibration_test": {
+            "original_data": test_vibrations,
+            "filter_result": vibration_filter_result,
+            "filter_parameters": {
+                "baseline_range": f"{VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} deg/s",
+                "tolerance": f"{VEHICLE_VIBRATION_FILTER['baseline_tolerance']} deg/s",
+                "spike_threshold": f"{VEHICLE_VIBRATION_FILTER['road_spike_threshold']} deg/s",
+                "slope_threshold": f"{VEHICLE_VIBRATION_FILTER['slope_trend_threshold']} deg/s"
+            }
+        }
+    })
 
 @app.route('/thingsboard/test', methods=['GET'])
 def test_thingsboard():
-    """Endpoint untuk test koneksi ThingsBoard"""
+    """Endpoint untuk test koneksi ThingsBoard - UPDATED 3 parameter"""
     test_payload = {
-        "test_message": "Road monitoring test with vibration filter",
+        "test_message": "Road monitoring test with 3 parameters",
         "test_timestamp": datetime.now().isoformat(),
         "test_status": "active",
         "mysql_connection": "ok" if get_db_connection() else "failed",
-        "conversion_support": "m/s² enabled for accelerometer",
-        "vibration_unit": "m/s² (filtered)",
-        "vibration_filter": "enabled"
+        "parameters": "surface + shock + vibration",
+        "shock_unit": "m/s² (filtered)",
+        "vibration_unit": "deg/s (filtered)",
+        "filters": "shock & vibration filters enabled"
     }
     
     success = send_to_thingsboard(test_payload, "connection_test")
@@ -1324,81 +1430,53 @@ def test_thingsboard():
         "thingsboard_connection": "success" if success else "failed",
         "thingsboard_url": THINGSBOARD_URL,
         "timestamp": datetime.now().isoformat(),
-        "conversion_status": "m/s² support enabled",
-        "vibration_filter_status": "enabled"
-    })
-
-@app.route('/debug/vibration/filter', methods=['GET'])
-def debug_vibration_filter():
-    """Debug endpoint untuk test filter getaran"""
-    # Test data getaran
-    test_vibrations = [
-        1.5, 2.1, 1.8, 2.0, 1.9,  # Getaran kendaraan normal
-        8.5, 9.2, 7.8,              # Getaran jalan rusak
-        2.2, 1.7, 2.3, 1.6,         # Getaran kendaraan lagi
-        12.1, 15.3, 11.8,           # Getaran jalan rusak parah
-        2.0, 1.9, 2.1               # Getaran kendaraan
-    ]
-    
-    # Terapkan filter
-    filter_result = filter_vehicle_vibration(test_vibrations)
-    
-    return jsonify({
-        "test_data": {
-            "original_vibrations": test_vibrations,
-            "total_count": len(test_vibrations)
-        },
-        "filter_result": filter_result,
-        "filter_parameters": {
-            "baseline_range": f"{VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} m/s²",
-            "tolerance": f"{VEHICLE_VIBRATION_FILTER['baseline_tolerance']} m/s²",
-            "max_gradient": f"{VEHICLE_VIBRATION_FILTER['max_gradient']} m/s²",
-            "spike_threshold": f"{VEHICLE_VIBRATION_FILTER['road_spike_threshold']} m/s²"
-        }
+        "parameters_status": "3 parameters enabled",
+        "filters_status": "shock & vibration filters enabled"
     })
 
 if __name__ == '__main__':
     print("🚀 Road Monitoring Flask Server Starting...")
     print("=" * 60)
     print("📡 Available Endpoints:")
-    print("   - POST /multisensor       : Receive ESP32 sensor data (vibration filter)")
+    print("   - POST /multisensor       : Receive ESP32 sensor data (3 parameters)")
     print("   - GET  /status           : System status")
     print("   - GET  /analysis         : Get analysis results")
     print("   - GET  /summary          : Get damage summary")
     print("   - GET  /thingsboard/test : Test ThingsBoard connection")
-    print("   - GET  /debug/vibration/filter : Test vibration filter")
+    print("   - GET  /debug/filters/test : Test shock & vibration filters")
     print("=" * 60)
     print("🔗 ThingsBoard Integration:")
     print(f"   - Server: {THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}")
     print(f"   - URL: {THINGSBOARD_URL}")
     print(f"   - Data Prefix: fls_ (Flask)")
     print("=" * 60)
-    print("📊 SISTEM KLASIFIKASI (UPDATED with Vibration Filter):")
-    print("   ✅ ROTASI DIHAPUS dari parameter klasifikasi")
-    print("   ✅ Logika OR diubah menjadi AND")
-    print("   ✅ Vibration: LSB → g → m/s² conversion")
-    print("   ✅ FILTER GETARAN KENDARAAN: Baseline detection")
-    print("   ✅ Klasifikasi: Surface Change AND Vibration (filtered)")
-    print("   ✅ KEDUA parameter harus memenuhi threshold untuk deteksi kerusakan")
-    print("=" * 60)
-    print("🔧 VIBRATION FILTER PARAMETERS:")
-    print(f"   - Baseline Range: {VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} m/s²")
-    print(f"   - Tolerance: ±{VEHICLE_VIBRATION_FILTER['baseline_tolerance']} m/s²")
-    print(f"   - Max Gradient: {VEHICLE_VIBRATION_FILTER['max_gradient']} m/s²")
-    print(f"   - Road Spike Threshold: {VEHICLE_VIBRATION_FILTER['road_spike_threshold']} m/s²")
-    print("=" * 60)
-    print("🔄 Classification Rules (AND Logic + Filtered Vibration):")
-    print("   - RUSAK BERAT: Surface ≥10cm AND Vibration ≥10.0m/s² (filtered)")
-    print("   - RUSAK SEDANG: Surface ≥5cm AND Vibration ≥5.0m/s² (filtered)")
-    print("   - RUSAK RINGAN: Surface ≥2cm AND Vibration ≥2.0m/s² (filtered)")
-    print("   - BAIK: Jika salah satu parameter tidak memenuhi threshold")
-    print("=" * 60)
-    print("💾 Resource Optimization:")
-    print("   - Image saved only when damage detected")
-    print("   - MySQL & ThingsBoard: DAMAGE DATA ONLY")
-    print("   - Good road conditions: No database insert, no image")
-    print("   - Vibration data: m/s² (filtered from vehicle vibrations)")
-    print("=" * 60)
+    # print("📊 SISTEM KLASIFIKASI (3 PARAMETERS):")
+    # print("   ✅ PARAMETER 1: Surface Change (cm) - Ultrasonic")
+    # print("   ✅ PARAMETER 2: Shock (m/s²) - Accelerometer + Vehicle Filter")
+    # print("   ✅ PARAMETER 3: Vibration (deg/s) - Gyroscope + Vehicle & Slope Filter")
+    # print("   ✅ Klasifikasi: 3 parameters dengan threshold masing-masing")
+    # print("=" * 60)
+    # print("🔧 FILTER PARAMETERS:")
+    # print(f"   SHOCK FILTER (m/s²):")
+    # print(f"   - Baseline Range: {VEHICLE_SHOCK_FILTER['baseline_min']}-{VEHICLE_SHOCK_FILTER['baseline_max']} m/s²")
+    # print(f"   - Spike Threshold: {VEHICLE_SHOCK_FILTER['road_spike_threshold']} m/s²")
+    # print(f"   VIBRATION FILTER (deg/s):")
+    # print(f"   - Baseline Range: {VEHICLE_VIBRATION_FILTER['baseline_min']}-{VEHICLE_VIBRATION_FILTER['baseline_max']} deg/s")
+    # print(f"   - Spike Threshold: {VEHICLE_VIBRATION_FILTER['road_spike_threshold']} deg/s")
+    # print(f"   - Slope Filter: Detects slope vs road damage")
+    # print("=" * 60)
+    # print("🔄 Classification Rules (3 Parameters):")
+    # print("   - Surface Change: Ultrasonic sensor differences")
+    # print("   - Shock: Accelerometer spikes (filtered from vehicle)")
+    # print("   - Vibration: Gyroscope oscillations (filtered from vehicle & slope)")
+    # print("   - Logic: Based on threshold combinations")
+    # print("=" * 60)
+    # print("💾 Resource Optimization:")
+    # print("   - Image saved only when damage detected")
+    # print("   - MySQL & ThingsBoard: DAMAGE DATA ONLY")
+    # print("   - Good road conditions: No database insert, no image")
+    # print("   - Data: 3 parameters with proper filtering")
+    # print("=" * 60)
     
     # Test database connection
     test_conn = get_db_connection()
@@ -1409,21 +1487,32 @@ if __name__ == '__main__':
         print("❌ Database connection failed - check configuration")
         exit(1)
     
-    # Test vibration filter
-    test_vibrations = [1.5, 2.1, 8.5, 2.0, 12.1, 1.9]
-    filter_result = filter_vehicle_vibration(test_vibrations)
-    print(f"🔧 Vibration Filter Test:")
-    print(f"   Original: {len(test_vibrations)} vibrations")
-    print(f"   Vehicle: {filter_result['stats']['vehicle_count']} (filtered out)")
-    print(f"   Road: {filter_result['stats']['road_count']} (analyzed)")
+    # # Test filters
+    # test_shocks = [1.5, 2.1, 28.5, 2.0, 45.1, 1.9]
+    # test_vibrations = [50, 45, 150, 48, 220, 52]
+    
+    # shock_filter_result = filter_vehicle_shock(test_shocks)
+    # vibration_filter_result = filter_vehicle_vibration(test_vibrations)
+    
+    # print(f"🔧 Shock Filter Test:")
+    # print(f"   Original: {len(test_shocks)} shocks")
+    # print(f"   Vehicle: {shock_filter_result['stats']['vehicle_count']} (filtered out)")
+    # print(f"   Road: {shock_filter_result['stats']['road_count']} (analyzed)")
+    
+    # print(f"🔧 Vibration Filter Test:")
+    # print(f"   Original: {len(test_vibrations)} vibrations")
+    # print(f"   Vehicle: {vibration_filter_result['stats']['vehicle_count']} (filtered out)")
+    # print(f"   Slope: {vibration_filter_result['stats']['slope_count']} (filtered out)")
+    # print(f"   Road: {vibration_filter_result['stats']['road_count']} (analyzed)")
     
     # Test ThingsBoard connection
     test_payload = {
-        "startup_test": "Flask server starting with vibration filter",
+        "startup_test": "Flask server starting with 3 parameters",
         "startup_timestamp": datetime.now().isoformat(),
-        "conversion_update": "GY-521 accelerometer now in m/s²",
-        "vibration_filter": "enabled - vehicle vibrations filtered out",
-        "classification_change": "Rotation removed, OR changed to AND, Vibration filtered"
+        "parameters": "surface + shock + vibration",
+        "shock_unit": "m/s² (filtered)",
+        "vibration_unit": "deg/s (filtered)",
+        "filters": "shock & vibration filters enabled"
     }
     
     if send_to_thingsboard(test_payload, "startup_test"):
