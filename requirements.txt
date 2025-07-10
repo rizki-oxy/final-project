@@ -5,3 +5,5 @@ matplotlib==3.9.2
 mysql-connector-python==9.1.0
 python-dotenv==1.0.0
 Werkzeug==3.0.4
+pandas==2.2.2
+openpyxl==3.0.10

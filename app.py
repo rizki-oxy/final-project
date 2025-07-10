@@ -13,6 +13,7 @@ import math
 import mysql.connector
 from mysql.connector import Error
 import base64
+import pandas as pd
 from dotenv import load_dotenv
 from thresholds import (
     MIN_DATA_POINTS, ANALYSIS_INTERVAL, EARTH_RADIUS, MAX_GPS_GAP,
@@ -20,11 +21,13 @@ from thresholds import (
     get_surface_change_severity, get_shock_severity, get_vibration_severity,
     classify_damage_three_params, VEHICLE_SHOCK_FILTER, VEHICLE_VIBRATION_FILTER
 )
+from dashboard import dashboard_bp
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
+app.register_blueprint(dashboard_bp, url_prefix='/dashboard')
 
 # Konfigurasi dari .env
 DB_CONFIG = {
@@ -846,7 +849,7 @@ def create_analysis_visualization(analysis_data):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'road_damage_{timestamp}.png'
     filepath = os.path.join(UPLOAD_FOLDER, filename)
-    plt.savefig(filepath, dpi=100, bbox_inches='tight')
+    plt.savefig(filepath, dpi=80, bbox_inches='tight', format='png', optimize=True)
     plt.close()
     
     return filepath, filename
