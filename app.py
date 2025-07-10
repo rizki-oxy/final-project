@@ -468,9 +468,9 @@ def analyze_surface_changes(data_points):
             curr_val = curr_data.get(sensor_key)
             
             if prev_val is not None and curr_val is not None and prev_val != -1 and curr_val != -1:
-                change = abs(curr_val - prev_val)
-                if change >= SURFACE_CHANGE_THRESHOLDS['minor']:
-                    changes.append(change)
+                change = curr_val - prev_val  # Bisa positif atau negatif
+                if abs(change) >= SURFACE_CHANGE_THRESHOLDS['minor']:
+                    changes.append(change)  # Simpan dengan tanda asli
     
     return {
         'changes': changes,
@@ -700,20 +700,21 @@ def create_analysis_visualization(analysis_data):
         time_points = [i * (analysis_duration / (num_changes - 1)) if num_changes > 1 else 0 
                       for i in range(num_changes)]
         
-        ax1.plot(time_points, analysis_data['surface_analysis']['changes'], 
+        negative_changes = [-change for change in analysis_data['surface_analysis']['changes']]
+        ax1.plot(time_points, negative_changes, 
                 marker='o', linewidth=2, markersize=4, color='orange', alpha=0.8)
-        ax1.axhline(y=analysis_data['surface_analysis']['max_change'], 
-                   color='red', linestyle='--', alpha=0.7,
-                   label=f'Max: {analysis_data["surface_analysis"]["max_change"]:.1f}cm')
-        ax1.axhline(y=analysis_data['surface_analysis']['avg_change'], 
-                   color='blue', linestyle=':', alpha=0.7,
-                   label=f'Avg: {analysis_data["surface_analysis"]["avg_change"]:.1f}cm')
+        ax1.axhline(y=-analysis_data['surface_analysis']['max_change'], 
+                color='red', linestyle='--', alpha=0.7,
+                label=f'Max Depth: {analysis_data["surface_analysis"]["max_change"]:.1f}cm')
+        ax1.axhline(y=-analysis_data['surface_analysis']['avg_change'], 
+                color='blue', linestyle=':', alpha=0.7,
+                label=f'Avg Depth: {analysis_data["surface_analysis"]["avg_change"]:.1f}cm')
         
-        ax1.fill_between(time_points, analysis_data['surface_analysis']['changes'], 
-                        alpha=0.3, color='orange')
+        ax1.fill_between(time_points, negative_changes, 
+                alpha=0.3, color='orange')
         ax1.set_title('Perubahan Permukaan Jalan')
         ax1.set_xlabel('Waktu (detik)')
-        ax1.set_ylabel('Perubahan (cm)')
+        ax1.set_ylabel('Kedalaman Lubang / Perubahan (cm)')
         ax1.set_xlim(0, 30)
         ax1.legend()
         ax1.grid(True, alpha=0.3)
