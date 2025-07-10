@@ -474,8 +474,10 @@ def analyze_surface_changes(data_points):
     
     return {
         'changes': changes,
-        'max_change': max(changes) if changes else 0,
-        'avg_change': sum(changes) / len(changes) if changes else 0,
+        'max_change': max([abs(c) for c in changes]) if changes else 0,  # ABSOLUT untuk klasifikasi
+        'avg_change': sum([abs(c) for c in changes]) / len(changes) if changes else 0,  # ABSOLUT
+        'max_positive': max([c for c in changes if c > 0]) if any(c > 0 for c in changes) else 0,  # Lubang terdalam
+        'max_negative': min([c for c in changes if c < 0]) if any(c < 0 for c in changes) else 0,  # Gundukan tertinggi
         'count': len(changes)
     }
 
@@ -705,10 +707,10 @@ def create_analysis_visualization(analysis_data):
                 marker='o', linewidth=2, markersize=4, color='orange', alpha=0.8)
         ax1.axhline(y=-analysis_data['surface_analysis']['max_change'], 
                 color='red', linestyle='--', alpha=0.7,
-                label=f'Max Depth: {analysis_data["surface_analysis"]["max_change"]:.1f}cm')
+                label=f'Max Surface Change: {analysis_data["surface_analysis"]["max_change"]:.1f}cm')
         ax1.axhline(y=-analysis_data['surface_analysis']['avg_change'], 
                 color='blue', linestyle=':', alpha=0.7,
-                label=f'Avg Depth: {analysis_data["surface_analysis"]["avg_change"]:.1f}cm')
+                label=f'Avg Surface Change: {analysis_data["surface_analysis"]["avg_change"]:.1f}cm')
         
         ax1.fill_between(time_points, negative_changes, 
                 alpha=0.3, color='orange')
@@ -725,6 +727,12 @@ def create_analysis_visualization(analysis_data):
         ax1.set_xlabel('Waktu (detik)')
         ax1.set_xlim(0, 30)
         ax1.grid(True, alpha=0.3)
+        
+        def format_y_label(value, pos):
+            return f'{abs(value):.0f}'
+        
+        from matplotlib.ticker import FuncFormatter
+        ax1.yaxis.set_major_formatter(FuncFormatter(format_y_label))
     
     # 2. Data guncangan (shock) - m/s²
     if analysis_data['shock_analysis']['shocks']:
