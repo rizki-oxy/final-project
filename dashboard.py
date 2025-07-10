@@ -41,13 +41,13 @@ def get_tables():
                 'name': 'road_damage_analysis',
                 'display_name': 'Analisis Kerusakan Jalan',
                 'description': 'Data hasil analisis kerusakan jalan (30 detik)',
-                'icon': '🛣️'
+                'icon': ''
             },
             {
                 'name': 'sensor_data', 
                 'display_name': 'Data Sensor Mentah',
                 'description': 'Data sensor real-time (GPS, Ultrasonic, IMU)',
-                'icon': '📡'
+                'icon': ''
             }
         ]
     })
