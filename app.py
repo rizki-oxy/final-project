@@ -78,6 +78,8 @@ class DataBuffer:
 # Global data buffer
 data_buffer = DataBuffer(ANALYSIS_INTERVAL)
 last_analysis_time = 0
+first_data_received_time = None  # Waktu pertama data diterima dari ESP32
+INITIAL_SKIP_PERIOD = 30  # Skip 30 detik pertama setelah data pertama
 
 def get_db_connection():
     """Membuat koneksi ke database MySQL"""
@@ -927,10 +929,24 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             connection.close()
 
 def perform_30s_analysis():
-    """Melakukan analisis komprehensif setiap 30 detik dengan 3 parameter"""
+    """Melakukan analisis komprehensif setiap 30 detik dengan 3 parameter - SKIP 30 detik pertama"""
     global last_analysis_time
     
     current_time = time.time()
+    
+    # CEK APAKAH SUDAH MENERIMA DATA DARI ESP32
+    if first_data_received_time is None:
+        print(f"⏳ Belum menerima data dari ESP32 - Menunggu koneksi hardware...")
+        return
+    
+    # CEK APAKAH MASIH DALAM PERIODE SKIP 30 DETIK SETELAH DATA PERTAMA
+    elapsed_since_first_data = current_time - first_data_received_time
+    if elapsed_since_first_data < INITIAL_SKIP_PERIOD:
+        remaining_time = INITIAL_SKIP_PERIOD - elapsed_since_first_data
+        print(f"⏳ Skipping analysis - Hardware warming up: {remaining_time:.1f}s remaining")
+        print(f"💡 Reason: Sensor stabilization, GPS acquisition, initial data settling")
+        return
+    
     data_points = data_buffer.get_data()
     
     if len(data_points) < MIN_DATA_POINTS:
@@ -939,6 +955,7 @@ def perform_30s_analysis():
     
     print(f"🔍 Memulai analisis 30 detik dengan {len(data_points)} data points...")
     print(f"📊 Menggunakan 3 parameter: Surface + Shock + Vibration")
+    print(f"✅ Hardware sudah stabil - Warming up period selesai ({elapsed_since_first_data:.1f}s since first data)")
     
     start_time = time.time()
     
@@ -1023,11 +1040,16 @@ def perform_30s_analysis():
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
     """Endpoint untuk menerima data sensor dari ESP32 - UPDATED dengan 3 parameter"""
-    global last_analysis_time
+    global last_analysis_time, first_data_received_time
     
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data received"}), 400
+    
+    # SET WAKTU PERTAMA MENERIMA DATA
+    if first_data_received_time is None:
+        first_data_received_time = time.time()
+        print(f"🔌 ESP32 connected! Hardware warming up started ({INITIAL_SKIP_PERIOD}s)")
     
     print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
     
@@ -1083,6 +1105,18 @@ def status():
     """Endpoint untuk cek status sistem - UPDATED dengan 3 parameter"""
     data_points = data_buffer.get_data()
     
+    # Cek warming up berdasarkan data pertama
+    current_time = time.time()
+    if first_data_received_time is not None:
+        elapsed_since_first_data = current_time - first_data_received_time
+        warming_up = elapsed_since_first_data < INITIAL_SKIP_PERIOD
+        warming_up_remaining = max(0, INITIAL_SKIP_PERIOD - elapsed_since_first_data)
+        hardware_connected_duration = elapsed_since_first_data
+    else:
+        warming_up = False
+        warming_up_remaining = 0
+        hardware_connected_duration = 0
+    
     # Analisis data terbaru
     latest_data = data_points[-1] if data_points else {}
     
@@ -1110,6 +1144,14 @@ def status():
     return jsonify({
         "system_status": "running",
         "timestamp": datetime.now().isoformat(),
+        "warming_up": {
+            "is_warming_up": warming_up,
+            "remaining_seconds": warming_up_remaining,
+            "total_skip_period": INITIAL_SKIP_PERIOD,
+            "hardware_connected": first_data_received_time is not None,
+            "hardware_connected_duration": hardware_connected_duration,
+            "reason": "Hardware sensor stabilization, GPS acquisition, initial data settling"
+        },
         "data_buffer": {
             "count": len(data_points),
             "max_duration": ANALYSIS_INTERVAL
@@ -1436,6 +1478,13 @@ def test_thingsboard():
 
 if __name__ == '__main__':
     print("🚀 Road Monitoring Flask Server Starting...")
+    print("=" * 60)
+    print("⏳ HARDWARE WARMING UP PERIOD:")
+    print(f"   - Skip first {INITIAL_SKIP_PERIOD} seconds after ESP32 connects")
+    print(f"   - Warming up starts when first data received")
+    print(f"   - Allows sensor stabilization and GPS acquisition")
+    print(f"   - Raw data collection continues normally")
+    print(f"   - Only road damage analysis is skipped")
     print("=" * 60)
     print("📡 Available Endpoints:")
     print("   - POST /multisensor       : Receive ESP32 sensor data (3 parameters)")
