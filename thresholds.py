@@ -8,23 +8,23 @@
 
 # Ultrasonic Sensor Thresholds
 SURFACE_CHANGE_THRESHOLDS = {
-    'minor': 2.5,      # cm - perubahan kecil
-    'moderate': 5.0,   # cm - perubahan sedang
-    'major': 7.0       # cm - perubahan besar
+    'minor': 2.0,      # cm - perubahan kecil
+    'moderate': 6.0,   # cm - perubahan sedang
+    'major': 10.0       # cm - perubahan besar
 }
 
 # Accelerometer Shock Thresholds (m/s²)
 SHOCK_THRESHOLDS = {
-    'light': 25.0,     # m/s² - guncangan ringan
-    'moderate': 30.0,  # m/s² - guncangan sedang
-    'heavy': 40.0      # m/s² - guncangan berat
+    'light': 25.0,     # m/s² - guncangan ringan 
+    'moderate': 45.0,  # m/s² - guncangan sedang 
+    'heavy': 60.0      # m/s² - guncangan berat
 }
 
 # Gyroscope Vibration Thresholds (deg/s)
 VIBRATION_THRESHOLDS = {
-    'light': 100.0,    # deg/s - getaran ringan
-    'moderate': 150.0, # deg/s - getaran sedang
-    'heavy': 200.0     # deg/s - getaran berat
+    'light': 12.0,    # deg/s - getaran ringan
+    'moderate': 25.0, # deg/s - getaran sedang
+    'heavy': 40.0     # deg/s - getaran berat
 }
 
 # === FILTER GUNCANGAN KENDARAAN (SHOCK) ===
@@ -50,25 +50,28 @@ VEHICLE_SHOCK_FILTER = {
 # === FILTER GETARAN KENDARAAN (VIBRATION) ===
 # Parameter untuk membedakan getaran motor vs getaran jalan rusak vs tanjakan/turunan
 VEHICLE_VIBRATION_FILTER = {
-    # Range getaran normal kendaraan bermotor (dalam deg/s)
-    'baseline_min': 10.0,   # deg/s - getaran minimum kendaraan idle
-    'baseline_max': 80.0,   # deg/s - getaran maksimum kendaraan normal
+    # Range getaran normal kendaraan bermotor (dalam deg/s) - SETELAH KALIBRASI
+    'baseline_min': 0.0,    # TURUN dari 10.0 -> 3.0 (karena noise sudah dihilangkan)
+    'baseline_max': 8.0,   # TURUN dari 80.0 -> 70.0
     
     # Toleransi untuk baseline consistency
-    'baseline_tolerance': 20.0,  # deg/s - toleransi dari baseline median
+    'baseline_tolerance': 3.0,  # TURUN dari 20.0 -> 10.0 deg/s
     
     # Gradien maksimum untuk getaran kendaraan (perubahan bertahap)
-    'max_gradient': 15.0,   # deg/s - perubahan maksimum antar sample untuk getaran kendaraan
+    'max_gradient': 2.0,    # TURUN dari 15.0 -> 8.0 deg/s
     
     # Threshold untuk spike jalan rusak (pasti bukan getaran kendaraan)
-    'road_spike_threshold': 100.0,  # deg/s - di atas ini pasti jalan rusak
+    'road_spike_threshold': 12.0,  # TURUN dari 100.0 -> 80.0 deg/s
+    
+    # TAMBAHAN BARU: Dead zone untuk noise sensor yang tersisa setelah kalibrasi ESP32
+    'dead_zone_threshold': 1.0,  # deg/s - di bawah ini dianggap 0 (backup filter)
     
     # Parameter untuk deteksi tanjakan/turunan
-    'slope_trend_threshold': 5.0,   # deg/s - tren linear maksimum untuk slope
-    'slope_amplitude_threshold': 60.0,  # deg/s - amplitudo maksimum untuk slope
+    'slope_trend_threshold': 2.0,   # TURUN dari 5.0 -> 4.0 deg/s
+    'slope_amplitude_threshold': 10.0,  # TURUN dari 60.0 -> 50.0 deg/s
     
     # Minimum sample untuk analisis pola
-    'min_samples': 3        # minimum data point untuk analisis
+    'min_samples': 3        
 }
 
 # === KLASIFIKASI KERUSAKAN JALAN (3 PARAMETER) ===
@@ -76,19 +79,19 @@ VEHICLE_VIBRATION_FILTER = {
 # Threshold untuk klasifikasi dengan 3 parameter
 DAMAGE_CLASSIFICATION_3PARAM = {
     'rusak_berat': {
-        'surface_change': 7.0,   # >= 7 cm
-        'shock': 40.0,           # >= 40.0 m/s² (filtered)
-        'vibration': 200.0,      # >= 200.0 deg/s (filtered)
+        'surface_change': 10.0,   # >= 10 cm
+        'shock': 60.0,           # >= 40.0 m/s² (filtered)
+        'vibration': 40.0,      # TURUN dari 200.0 -> 180.0 deg/s (calibrated + filtered)
     },
     'rusak_sedang': {
-        'surface_change': 5.0,   # >= 5 cm
-        'shock': 30.0,           # >= 30.0 m/s² (filtered)
-        'vibration': 150.0,      # >= 150.0 deg/s (filtered)
+        'surface_change': 6.0,   # >= 6 cm
+        'shock': 45.0,           # >= 30.0 m/s² (filtered)
+        'vibration': 25.0,      # TURUN dari 150.0 -> 120.0 deg/s (calibrated + filtered)
     },
     'rusak_ringan': {
-        'surface_change': 2.5,   # >= 2.5 cm
+        'surface_change': 2.0,   # >= 2.0 cm
         'shock': 25.0,           # >= 25.0 m/s² (filtered)
-        'vibration': 100.0,      # >= 100.0 deg/s (filtered)
+        'vibration': 12.0,       # TURUN dari 100.0 -> 80.0 deg/s (calibrated + filtered)
     }
 }
 
@@ -135,7 +138,7 @@ def get_shock_severity(shock_value):
     return 'normal'
 
 def get_vibration_severity(vibration_value):
-    """Mendapatkan tingkat keparahan getaran (dalam deg/s - sudah difilter)"""
+    """Mendapatkan tingkat keparahan getaran (dalam deg/s - sudah dikalibrasi dan difilter)"""
     abs_vibration = abs(vibration_value)
     if abs_vibration >= VIBRATION_THRESHOLDS['heavy']:
         return 'heavy'
@@ -149,15 +152,18 @@ def classify_damage_three_params(max_surface_change, max_shock, max_vibration):
     """
     Klasifikasi kerusakan jalan dengan 3 parameter: Surface + Shock + Vibration
     
+    UPDATED: Threshold vibration telah disesuaikan dengan kalibrasi gyroscope ESP32
+    
     Logika Klasifikasi:
     - Menggunakan kombinasi threshold dari ketiga parameter
     - Shock dan Vibration sudah difilter dari noise kendaraan
+    - Vibration sudah dikalibrasi di ESP32 untuk menghilangkan offset sensor
     - Prioritas berdasarkan tingkat keparahan parameter
     
     Args:
         max_surface_change (float): Perubahan permukaan maksimum (cm)
         max_shock (float): Guncangan maksimum (m/s²) - SUDAH DIFILTER
-        max_vibration (float): Getaran maksimum (deg/s) - SUDAH DIFILTER
+        max_vibration (float): Getaran maksimum (deg/s) - SUDAH DIKALIBRASI & DIFILTER
     
     Returns:
         str: Klasifikasi kerusakan ('rusak_berat', 'rusak_sedang', 'rusak_ringan', 'baik')
@@ -168,7 +174,7 @@ def classify_damage_three_params(max_surface_change, max_shock, max_vibration):
     shock = max_shock if max_shock is not None else 0
     vibration = max_vibration if max_vibration is not None else 0
     
-    print(f"🔍 Klasifikasi 3 Parameter: Surface={surface:.2f}cm, Shock={shock:.2f}m/s², Vibration={vibration:.2f}deg/s")
+    print(f"🔍 Klasifikasi 3 Parameter (CALIBRATED): Surface={surface:.2f}cm, Shock={shock:.2f}m/s², Vibration={vibration:.2f}deg/s")
     
     # Hitung score berdasarkan berapa parameter yang memenuhi threshold
     rusak_berat_score = 0
@@ -203,32 +209,32 @@ def classify_damage_three_params(max_surface_change, max_shock, max_vibration):
     # Minimal 2 dari 3 parameter harus memenuhi threshold
     
     if rusak_berat_score >= 2:
-        print(f"📊 Klasifikasi: RUSAK BERAT - {rusak_berat_score}/3 parameter memenuhi threshold")
+        print(f"📊 Klasifikasi: RUSAK BERAT - {rusak_berat_score}/3 parameter memenuhi threshold (CALIBRATED)")
         return 'rusak_berat'
     elif rusak_sedang_score >= 2:
-        print(f"📊 Klasifikasi: RUSAK SEDANG - {rusak_sedang_score}/3 parameter memenuhi threshold")
+        print(f"📊 Klasifikasi: RUSAK SEDANG - {rusak_sedang_score}/3 parameter memenuhi threshold (CALIBRATED)")
         return 'rusak_sedang'
     elif rusak_ringan_score >= 2:
-        print(f"📊 Klasifikasi: RUSAK RINGAN - {rusak_ringan_score}/3 parameter memenuhi threshold")
+        print(f"📊 Klasifikasi: RUSAK RINGAN - {rusak_ringan_score}/3 parameter memenuhi threshold (CALIBRATED)")
         return 'rusak_ringan'
     else:
-        print(f"📊 Klasifikasi: BAIK - Tidak cukup parameter memenuhi threshold")
+        print(f"📊 Klasifikasi: BAIK - Tidak cukup parameter memenuhi threshold (CALIBRATED)")
         print(f"   Berat: {rusak_berat_score}/3, Sedang: {rusak_sedang_score}/3, Ringan: {rusak_ringan_score}/3")
-        print(f"   Shock & Vibration sudah difilter dari noise kendaraan")
+        print(f"   Vibration sudah dikalibrasi di ESP32, Shock & Vibration sudah difilter dari noise kendaraan")
         return 'baik'
 
 # === FUNGSI UNTUK BACKWARD COMPATIBILITY ===
 
 def classify_damage_or_logic(max_surface_change, max_shock, max_vibration):
-    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter dengan kalibrasi"""
     return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
 
 def classify_damage_simple(max_surface_change, max_shock, max_vibration):
-    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter dengan kalibrasi"""
     return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
 
 def classify_damage_flexible(max_surface_change, max_shock, max_vibration):
-    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter"""
+    """Alias untuk kompatibilitas - sekarang menggunakan 3 parameter dengan kalibrasi"""
     return classify_damage_three_params(max_surface_change, max_shock, max_vibration)
 
 # Legacy functions untuk kompatibilitas

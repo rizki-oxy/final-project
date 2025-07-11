@@ -849,7 +849,7 @@ def create_analysis_visualization(analysis_data):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'road_damage_{timestamp}.png'
     filepath = os.path.join(UPLOAD_FOLDER, filename)
-    plt.savefig(filepath, dpi=80, bbox_inches='tight', format='png', optimize=True)
+    plt.savefig(filepath, dpi=100, bbox_inches='tight')
     plt.close()
     
     return filepath, filename
