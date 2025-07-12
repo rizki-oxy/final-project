@@ -866,7 +866,7 @@ def create_analysis_visualization(analysis_data):
     return filepath, filename
 
 def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
-    """Menyimpan hasil analisis ke database - FIXED: gunakan image compression"""
+    """Menyimpan hasil analisis ke database - FIXED: database tetap PNG asli"""
     
     # Cek apakah ada kerusakan
     if not analysis_data.get('has_damage', False):
@@ -881,23 +881,18 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
     try:
         cursor = connection.cursor()
         
-        # FIXED: Encode image dengan kompresi untuk database
+        # FIXED: Database tetap simpan PNG asli (tidak dikompres)
         image_data = None
         if image_path and os.path.exists(image_path):
-            print(f"📸 Compressing image for database storage: {image_filename}")
+            print(f"📸 Saving original PNG to database: {image_filename}")
             
-            # Gunakan fungsi kompresi yang sudah ada
-            compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+            # Simpan PNG asli ke database
+            with open(image_path, 'rb') as img_file:
+                image_data = base64.b64encode(img_file.read()).decode('utf-8')
             
-            if success and compressed_base64:
-                image_data = compressed_base64
-                print(f"✅ Image compressed for database: {base64_size} bytes ({base64_size/1024:.1f}KB)")
-            else:
-                # Fallback: gunakan PNG asli jika kompresi gagal
-                print(f"⚠️ Compression failed, using original PNG")
-                with open(image_path, 'rb') as img_file:
-                    image_data = base64.b64encode(img_file.read()).decode('utf-8')
-                print(f"📸 Original PNG size: {len(image_data)} bytes")
+            original_size = len(image_data)
+            print(f"💾 Original PNG saved to database: {original_size} bytes ({original_size/1024:.1f}KB)")
+            print(f"📡 ThingsBoard akan menerima versi terkompresi saat dikirim")
         
         insert_query = """
         INSERT INTO road_damage_analysis (
@@ -932,7 +927,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             analysis_data['vibration_analysis']['avg_vibration'],
             analysis_data['vibration_analysis']['count'],
             json.dumps(analysis_data['anomalies']),
-            image_data,  # Sudah dikompresi jadi JPEG base64
+            image_data,  # PNG base64 asli (tidak dikompres)
             image_filename
         )
         
@@ -945,7 +940,8 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
         print(f"📊 Surface: {analysis_data['surface_analysis']['max_change']:.2f}cm")
         print(f"📊 Shock: {analysis_data['shock_analysis']['max_shock']:.2f}m/s² (filtered)")
         print(f"📊 Vibration: {analysis_data['vibration_analysis']['max_vibration']:.2f}deg/s (filtered)")
-        print(f"💾 Image stored as compressed JPEG base64 in database")
+        print(f"💾 Database: PNG asli tersimpan")
+        print(f"📡 ThingsBoard: Akan dikirim versi JPEG terkompresi")
         
         # Send to ThingsBoard dengan gambar dalam thread terpisah
         threading.Thread(
@@ -1378,7 +1374,7 @@ def try_further_compression(img, current_size):
 def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
     """
     Kirim data analisis dengan gambar yang dioptimasi untuk ThingsBoard
-    FOKUS: Mengatasi masalah gambar tidak tampil di ThingsBoard
+    UPDATED: Kompres dari file lokal, bukan dari database
     """
     connection = get_db_connection()
     if not connection:
@@ -1395,7 +1391,7 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             print(f"❌ Analysis ID {analysis_id} not found")
             return False
         
-        print(f"🔍 Sending analysis ID {analysis_id} to ThingsBoard with image fix")
+        print(f"🔍 Sending analysis ID {analysis_id} to ThingsBoard with image compression")
         
         # Buat payload dasar (tanpa gambar dulu)
         thingsboard_payload = {
@@ -1407,7 +1403,7 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             "shock_max_ms2": float(result['shock_max']) if result['shock_max'] else 0,
             "vibration_max_dps": float(result['vibration_max']) if result['vibration_max'] else 0,
             "damage_detected": True,
-            "image_optimization": "v2_thingsboard_fix"
+            "compression_strategy": "file_to_thingsboard_only"
         }
         
         # Add location if available
@@ -1415,46 +1411,50 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             thingsboard_payload["start_latitude"] = float(result['start_latitude'])
             thingsboard_payload["start_longitude"] = float(result['start_longitude'])
         
-        # Proses gambar dengan strategi bertingkat
+        # Proses gambar: Kompres dari file PNG asli untuk ThingsBoard
         image_success = False
         
         if result['image_filename']:
             image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
             
             if os.path.exists(image_path):
-                print(f"📸 Processing image: {result['image_filename']}")
+                print(f"📸 Compressing PNG file for ThingsBoard: {result['image_filename']}")
                 
-                # Coba kompres gambar untuk ThingsBoard
+                # Kompres dari file PNG asli (bukan dari database)
                 compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
                 
                 if success and compressed_base64:
-                    # Strategi 1: Kirim gambar yang sudah dioptimasi
+                    # Kirim gambar terkompresi ke ThingsBoard
                     thingsboard_payload.update({
                         "analysis_image_base64": compressed_base64,
                         "has_image": True,
-                        "image_format": "JPEG",
+                        "image_format": "JPEG_compressed_from_PNG",
                         "image_size_bytes": base64_size,
-                        "image_optimization_applied": True,
-                        "thingsboard_compatible": True
+                        "database_has_original": True,
+                        "compression_applied": True
                     })
                     image_success = True
-                    print(f"✅ Image optimized for ThingsBoard: {base64_size} bytes")
+                    print(f"✅ Compressed image sent to ThingsBoard: {base64_size} bytes")
+                    print(f"💾 Database tetap menyimpan PNG asli")
                     
                 else:
-                    # Strategi 2: Kirim metadata tanpa gambar
+                    # Jika kompresi gagal, kirim metadata saja
                     thingsboard_payload.update({
                         "has_image": False,
-                        "image_error": "optimization_failed",
-                        "image_too_large": True,
+                        "image_error": "compression_failed",
+                        "image_too_complex": True,
+                        "database_has_original": True,
                         "original_filename": result['image_filename']
                     })
                     print(f"⚠️ Image too complex for ThingsBoard - sending metadata only")
+                    print(f"💾 Original PNG tetap tersimpan di database")
             else:
                 thingsboard_payload.update({
                     "has_image": False,
-                    "image_error": "file_not_found"
+                    "image_error": "file_not_found",
+                    "database_has_original": True
                 })
-                print(f"❌ Image file not found: {image_path}")
+                print(f"❌ PNG file not found: {image_path}")
         else:
             thingsboard_payload.update({
                 "has_image": False,
@@ -1462,10 +1462,10 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             })
         
         # Send ke ThingsBoard
-        success = send_to_thingsboard(thingsboard_payload, "road_damage_image_fixed")
+        success = send_to_thingsboard(thingsboard_payload, "road_damage_compressed")
         
         if success:
-            status = "with optimized image" if image_success else "metadata only"
+            status = "with compressed image" if image_success else "metadata only"
             print(f"✅ Analysis data sent to ThingsBoard ({status}) - ID: {analysis_id}")
             return True
         else:
@@ -1473,7 +1473,7 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             return False
             
     except Exception as e:
-        print(f"❌ Error in ThingsBoard image fix: {e}")
+        print(f"❌ Error in ThingsBoard transmission: {e}")
         return False
     finally:
         if connection.is_connected():
@@ -1761,68 +1761,47 @@ def test_thingsboard():
         "filters_status": "shock & vibration filters enabled"
     })
 
-@app.route('/debug/database/compress-images', methods=['POST'])
-def compress_existing_images():
-    """Kompresi ulang gambar yang sudah tersimpan di database"""
+@app.route('/debug/thingsboard/test-compression/<int:analysis_id>', methods=['GET'])
+def test_compression_only(analysis_id):
+    """Test kompresi gambar tanpa mengubah database"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
     
     try:
         cursor = connection.cursor(dictionary=True)
+        query = "SELECT image_filename FROM road_damage_analysis WHERE id = %s"
+        cursor.execute(query, (analysis_id,))
+        result = cursor.fetchone()
         
-        # Ambil semua analysis dengan gambar
-        query = """
-        SELECT id, image_filename, analysis_image 
-        FROM road_damage_analysis 
-        WHERE image_filename IS NOT NULL 
-        ORDER BY analysis_timestamp DESC
-        """
-        cursor.execute(query)
-        results = cursor.fetchall()
+        if not result or not result['image_filename']:
+            return jsonify({"error": "Image not found for analysis"}), 404
         
-        compressed_count = 0
-        failed_count = 0
-        already_compressed_count = 0
+        image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
         
-        for result in results:
-            if result['image_filename'] and result['analysis_image']:
-                image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
-                
-                if os.path.exists(image_path):
-                    # Cek ukuran current base64
-                    current_size = len(result['analysis_image'])
-                    
-                    # Jika sudah kecil, skip
-                    if current_size <= THINGSBOARD_IMAGE_CONFIG['max_payload_size']:
-                        already_compressed_count += 1
-                        continue
-                    
-                    # Kompres ulang
-                    compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
-                    
-                    if success and compressed_base64:
-                        # Update database dengan gambar terkompresi
-                        update_query = "UPDATE road_damage_analysis SET analysis_image = %s WHERE id = %s"
-                        cursor.execute(update_query, (compressed_base64, result['id']))
-                        connection.commit()
-                        
-                        compressed_count += 1
-                        print(f"✅ Compressed analysis ID {result['id']}: {current_size} → {base64_size} bytes")
-                    else:
-                        failed_count += 1
-                        print(f"❌ Failed to compress analysis ID {result['id']}")
-                else:
-                    failed_count += 1
-                    print(f"❌ Image file not found for analysis ID {result['id']}")
+        if not os.path.exists(image_path):
+            return jsonify({"error": "PNG file not found on disk"}), 404
         
-        return jsonify({
-            "total_processed": len(results),
-            "compressed": compressed_count,
-            "failed": failed_count,
-            "already_compressed": already_compressed_count,
-            "message": f"Compressed {compressed_count} images successfully"
-        })
+        # Test compression dari file PNG
+        original_size = os.path.getsize(image_path)
+        compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+        
+        test_result = {
+            "analysis_id": analysis_id,
+            "strategy": "database_original_thingsboard_compressed",
+            "png_file": result['image_filename'],
+            "original_png_size_bytes": original_size,
+            "original_png_size_kb": round(original_size/1024, 1),
+            "compressed_jpeg_size_bytes": base64_size,
+            "compressed_jpeg_size_kb": round(base64_size/1024, 1),
+            "compression_ratio": f"{base64_size/original_size*100:.1f}%" if original_size > 0 else "0%",
+            "thingsboard_compatible": success,
+            "database_storage": "PNG asli tetap tersimpan",
+            "thingsboard_transmission": "JPEG terkompresi",
+            "status": "success" if success else "failed"
+        }
+        
+        return jsonify(test_result)
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
