@@ -1051,24 +1051,56 @@ def perform_30s_analysis():
 
 @app.route('/multisensor', methods=['POST'])
 def multisensor():
-    """Endpoint untuk menerima data sensor dari ESP32 - UPDATED dengan 3 parameter"""
+    """Endpoint untuk menerima data sensor dari ESP32 - FIXED Warming Up Period"""
     global last_analysis_time, first_data_received_time
     
     data = request.get_json()
     if not data:
         return jsonify({"error": "No data received"}), 400
     
+    current_time = time.time()
+    
     # SET WAKTU PERTAMA MENERIMA DATA
     if first_data_received_time is None:
-        first_data_received_time = time.time()
+        first_data_received_time = current_time
         print(f"🔌 ESP32 connected! Hardware warming up started ({INITIAL_SKIP_PERIOD}s)")
+        print(f"💡 During warming up: NO data save, NO buffer collection, NO analysis")
     
-    print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')}")
+    # CEK WARMING UP SEBELUM SEMUA OPERASI
+    elapsed_since_first_data = current_time - first_data_received_time
     
-    # Simpan data mentah ke database
+    if elapsed_since_first_data < INITIAL_SKIP_PERIOD:
+        remaining_time = INITIAL_SKIP_PERIOD - elapsed_since_first_data
+        print(f"⏳ Warming up: {remaining_time:.1f}s remaining - SKIPPING all data operations")
+        
+        # Return immediately - NO data save, NO buffer, NO processing
+        return jsonify({
+            "status": "warming_up",
+            "message": "Hardware warming up - data not saved or processed",
+            "remaining_seconds": remaining_time,
+            "elapsed_seconds": elapsed_since_first_data,
+            "timestamp": datetime.now().isoformat(),
+            "data_saved": False,
+            "buffer_updated": False,
+            "warming_up": True
+        }), 200
+    
+    # CLEAR BUFFER SAAT PERTAMA KALI KELUAR DARI WARMING UP
+    if not hasattr(multisensor, 'warming_up_cleared'):
+        with data_buffer.lock:
+            data_buffer.data_points.clear()  # Clear semua data warming up
+        multisensor.warming_up_cleared = True
+        last_analysis_time = current_time
+        print("🧹 Buffer cleared after warming up period - Starting fresh data collection")
+        print("✅ Hardware stabilized - Normal operations begin")
+    
+    # OPERASI NORMAL DIMULAI SETELAH WARMING UP SELESAI
+    print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')} (Post warming up)")
+    
+    # Simpan data mentah ke database (HANYA SETELAH WARMING UP)
     save_sensor_data(data)
     
-    # Tambahkan ke buffer untuk analisis
+    # Tambahkan ke buffer untuk analisis (HANYA SETELAH WARMING UP)
     data_buffer.add_data(data)
     
     # Proses shock dan vibration real-time
@@ -1091,12 +1123,12 @@ def multisensor():
             "fls_timestamp": datetime.now().isoformat(),
             "fls_data_type": "realtime_3param",
             "fls_shock_filter_enabled": True,
-            "fls_vibration_filter_enabled": True
+            "fls_vibration_filter_enabled": True,
+            "fls_post_warming_up": True
         })
         send_to_thingsboard(realtime_payload, "realtime_3param")
     
     # Cek apakah sudah waktunya untuk analisis 30 detik
-    current_time = time.time()
     if (current_time - last_analysis_time) >= ANALYSIS_INTERVAL:
         # Jalankan analisis di thread terpisah agar tidak blocking
         analysis_thread = threading.Thread(target=perform_30s_analysis)
@@ -1105,9 +1137,14 @@ def multisensor():
     
     return jsonify({
         "status": "success",
-        "message": "Data processed successfully (3 parameters with filters)",
+        "message": "Data processed successfully (post warming up)",
         "timestamp": datetime.now().isoformat(),
         "data_buffer_count": data_buffer.get_data_count(),
+        "data_saved": True,
+        "buffer_updated": True,
+        "warming_up": False,
+        "warming_up_completed": True,
+        "elapsed_since_connection": elapsed_since_first_data,
         "parameters": "surface + shock + vibration",
         "filters": "shock & vibration filters enabled"
     }), 200
