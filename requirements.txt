@@ -7,3 +7,4 @@ python-dotenv==1.0.0
 Werkzeug==3.0.4
 pandas==2.2.2
 openpyxl==3.0.10
+Pillow==10.0.0

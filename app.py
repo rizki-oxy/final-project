@@ -12,6 +12,8 @@ import threading
 import math
 import mysql.connector
 from mysql.connector import Error
+import io
+from PIL import Image
 import base64
 import pandas as pd
 from dotenv import load_dotenv
@@ -44,6 +46,15 @@ THINGSBOARD_CONFIG = {
     'server': os.getenv('THINGSBOARD_SERVER', '192.168.43.18'),
     'port': os.getenv('THINGSBOARD_PORT', '8081'),
     'access_token': os.getenv('THINGSBOARD_ACCESS_TOKEN', '0939gxC3IXo3uoCIgAED')
+}
+
+# Konfigurasi untuk ThingsBoard image compatibility
+THINGSBOARD_IMAGE_CONFIG = {
+    'max_width': 1024,           # Maksimal lebar untuk ThingsBoard
+    'max_height': 768,           # Maksimal tinggi untuk ThingsBoard
+    'jpeg_quality': 85,          # Kualitas JPEG yang bagus tapi tidak terlalu besar
+    'max_payload_size': 50000,   # 50KB - batas aman untuk ThingsBoard
+    'format': 'JPEG'            # Format yang lebih efisien daripada PNG
 }
 
 # Build ThingsBoard URL
@@ -855,7 +866,7 @@ def create_analysis_visualization(analysis_data):
     return filepath, filename
 
 def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
-    """Menyimpan hasil analisis ke database - UPDATED untuk 3 parameter"""
+    """Menyimpan hasil analisis ke database - FIXED: gunakan image compression"""
     
     # Cek apakah ada kerusakan
     if not analysis_data.get('has_damage', False):
@@ -870,11 +881,23 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
     try:
         cursor = connection.cursor()
         
-        # Encode image to base64 hanya jika ada gambar
+        # FIXED: Encode image dengan kompresi untuk database
         image_data = None
         if image_path and os.path.exists(image_path):
-            with open(image_path, 'rb') as img_file:
-                image_data = base64.b64encode(img_file.read()).decode('utf-8')
+            print(f"📸 Compressing image for database storage: {image_filename}")
+            
+            # Gunakan fungsi kompresi yang sudah ada
+            compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+            
+            if success and compressed_base64:
+                image_data = compressed_base64
+                print(f"✅ Image compressed for database: {base64_size} bytes ({base64_size/1024:.1f}KB)")
+            else:
+                # Fallback: gunakan PNG asli jika kompresi gagal
+                print(f"⚠️ Compression failed, using original PNG")
+                with open(image_path, 'rb') as img_file:
+                    image_data = base64.b64encode(img_file.read()).decode('utf-8')
+                print(f"📸 Original PNG size: {len(image_data)} bytes")
         
         insert_query = """
         INSERT INTO road_damage_analysis (
@@ -909,7 +932,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             analysis_data['vibration_analysis']['avg_vibration'],
             analysis_data['vibration_analysis']['count'],
             json.dumps(analysis_data['anomalies']),
-            image_data,
+            image_data,  # Sudah dikompresi jadi JPEG base64
             image_filename
         )
         
@@ -922,6 +945,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
         print(f"📊 Surface: {analysis_data['surface_analysis']['max_change']:.2f}cm")
         print(f"📊 Shock: {analysis_data['shock_analysis']['max_shock']:.2f}m/s² (filtered)")
         print(f"📊 Vibration: {analysis_data['vibration_analysis']['max_vibration']:.2f}deg/s (filtered)")
+        print(f"💾 Image stored as compressed JPEG base64 in database")
         
         # Send to ThingsBoard dengan gambar dalam thread terpisah
         threading.Thread(
@@ -1226,8 +1250,136 @@ def status():
         "next_analysis_in": max(0, ANALYSIS_INTERVAL - (time.time() - last_analysis_time))
     })
 
-def send_analysis_with_image_to_thingsboard(analysis_id):
-    """Kirim data analisis beserta gambar ke ThingsBoard dengan 3 parameter"""
+def compress_image_for_thingsboard(image_path):
+    """
+    Kompres gambar PNG menjadi JPEG yang kompatibel dengan ThingsBoard
+    Fokus pada mengatasi masalah payload size dan format compatibility
+    """
+    try:
+        print(f"📸 Processing image for ThingsBoard: {image_path}")
+        
+        # Buka gambar asli
+        with Image.open(image_path) as img:
+            original_size = os.path.getsize(image_path)
+            print(f"   Original PNG size: {original_size} bytes ({original_size/1024:.1f}KB)")
+            
+            # Convert RGBA ke RGB jika perlu (PNG dengan transparency)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # Buat background putih
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'RGBA':
+                    background.paste(img, mask=img.split()[-1])
+                elif img.mode == 'P':
+                    img = img.convert('RGBA')
+                    background.paste(img, mask=img.split()[-1])
+                else:
+                    background.paste(img)
+                img = background
+                print(f"   Converted {img.mode} to RGB")
+            
+            # Resize jika terlalu besar
+            original_dimensions = (img.width, img.height)
+            if img.width > THINGSBOARD_IMAGE_CONFIG['max_width'] or img.height > THINGSBOARD_IMAGE_CONFIG['max_height']:
+                img.thumbnail((
+                    THINGSBOARD_IMAGE_CONFIG['max_width'], 
+                    THINGSBOARD_IMAGE_CONFIG['max_height']
+                ), Image.Resampling.LANCZOS)
+                print(f"   Resized: {original_dimensions} → {img.size}")
+            
+            # Simpan sebagai JPEG dengan kompresi optimal
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, 
+                    format=THINGSBOARD_IMAGE_CONFIG['format'], 
+                    quality=THINGSBOARD_IMAGE_CONFIG['jpeg_quality'], 
+                    optimize=True)
+            
+            compressed_data = img_buffer.getvalue()
+            compressed_size = len(compressed_data)
+            
+            print(f"   JPEG compressed size: {compressed_size} bytes ({compressed_size/1024:.1f}KB)")
+            print(f"   Compression ratio: {compressed_size/original_size*100:.1f}%")
+            
+            # Convert ke base64
+            base64_string = base64.b64encode(compressed_data).decode('utf-8')
+            base64_size = len(base64_string)
+            
+            print(f"   Base64 size: {base64_size} bytes ({base64_size/1024:.1f}KB)")
+            
+            # Cek apakah ukuran sudah sesuai untuk ThingsBoard
+            if base64_size <= THINGSBOARD_IMAGE_CONFIG['max_payload_size']:
+                print(f"   ✅ ThingsBoard compatible ({base64_size} ≤ {THINGSBOARD_IMAGE_CONFIG['max_payload_size']})")
+                return base64_string, base64_size, True
+            else:
+                print(f"   ⚠️ Still too large for ThingsBoard ({base64_size} > {THINGSBOARD_IMAGE_CONFIG['max_payload_size']})")
+                # Coba dengan kualitas lebih rendah
+                return try_further_compression(img, compressed_size)
+                
+    except Exception as e:
+        print(f"❌ Error compressing image for ThingsBoard: {e}")
+        return None, 0, False
+
+def try_further_compression(img, current_size):
+    """
+    Coba kompresi lebih lanjut jika masih terlalu besar
+    """
+    print(f"   🔄 Trying further compression...")
+    
+    # Coba dengan kualitas yang lebih rendah
+    for quality in [75, 65, 55, 45]:
+        try:
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, 
+                    format='JPEG', 
+                    quality=quality, 
+                    optimize=True)
+            
+            compressed_data = img_buffer.getvalue()
+            base64_string = base64.b64encode(compressed_data).decode('utf-8')
+            base64_size = len(base64_string)
+            
+            print(f"   Quality {quality}%: {base64_size} bytes ({base64_size/1024:.1f}KB)")
+            
+            if base64_size <= THINGSBOARD_IMAGE_CONFIG['max_payload_size']:
+                print(f"   ✅ Success with quality {quality}%")
+                return base64_string, base64_size, True
+                
+        except Exception as e:
+            print(f"   ❌ Failed at quality {quality}%: {e}")
+            continue
+    
+    # Jika masih gagal, coba resize lebih kecil
+    print(f"   🔄 Trying smaller dimensions...")
+    for scale in [0.8, 0.6, 0.4]:
+        try:
+            new_width = int(img.width * scale)
+            new_height = int(img.height * scale)
+            resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            img_buffer = io.BytesIO()
+            resized_img.save(img_buffer, format='JPEG', quality=75, optimize=True)
+            
+            compressed_data = img_buffer.getvalue()
+            base64_string = base64.b64encode(compressed_data).decode('utf-8')
+            base64_size = len(base64_string)
+            
+            print(f"   Scale {scale}: {new_width}x{new_height}, {base64_size} bytes")
+            
+            if base64_size <= THINGSBOARD_IMAGE_CONFIG['max_payload_size']:
+                print(f"   ✅ Success with scale {scale}")
+                return base64_string, base64_size, True
+                
+        except Exception as e:
+            print(f"   ❌ Failed at scale {scale}: {e}")
+            continue
+    
+    print(f"   ❌ All compression attempts failed")
+    return None, 0, False
+
+def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
+    """
+    Kirim data analisis dengan gambar yang dioptimasi untuk ThingsBoard
+    FOKUS: Mengatasi masalah gambar tidak tampil di ThingsBoard
+    """
     connection = get_db_connection()
     if not connection:
         return False
@@ -1235,11 +1387,7 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
     try:
         cursor = connection.cursor(dictionary=True)
         
-        query = """
-        SELECT * FROM road_damage_analysis 
-        WHERE id = %s
-        """
-        
+        query = "SELECT * FROM road_damage_analysis WHERE id = %s"
         cursor.execute(query, (analysis_id,))
         result = cursor.fetchone()
         
@@ -1247,80 +1395,168 @@ def send_analysis_with_image_to_thingsboard(analysis_id):
             print(f"❌ Analysis ID {analysis_id} not found")
             return False
         
-        print(f"🔍 Processing analysis ID {analysis_id}")
-        print(f"📊 Surface: {result['surface_change_max']:.2f}cm")
-        print(f"📊 Shock: {result['shock_max']:.2f}m/s² (filtered)")
-        print(f"📊 Vibration: {result['vibration_max']:.2f}deg/s (filtered)")
+        print(f"🔍 Sending analysis ID {analysis_id} to ThingsBoard with image fix")
         
-        # Buat payload lengkap dengan 3 parameter
+        # Buat payload dasar (tanpa gambar dulu)
         thingsboard_payload = {
             "analysis_id": result['id'],
             "analysis_timestamp": result['analysis_timestamp'].isoformat() if result['analysis_timestamp'] else None,
             "damage_classification": result['damage_classification'],
             "damage_length": float(result['damage_length']) if result['damage_length'] else 0,
             "surface_change_max": float(result['surface_change_max']) if result['surface_change_max'] else 0,
-            "surface_change_avg": float(result['surface_change_avg']) if result['surface_change_avg'] else 0,
-            "surface_change_count": int(result['surface_change_count']) if result['surface_change_count'] else 0,
             "shock_max_ms2": float(result['shock_max']) if result['shock_max'] else 0,
-            "shock_avg_ms2": float(result['shock_avg']) if result['shock_avg'] else 0,
-            "shock_count": int(result['shock_count']) if result['shock_count'] else 0,
             "vibration_max_dps": float(result['vibration_max']) if result['vibration_max'] else 0,
-            "vibration_avg_dps": float(result['vibration_avg']) if result['vibration_avg'] else 0,
-            "vibration_count": int(result['vibration_count']) if result['vibration_count'] else 0,
             "damage_detected": True,
-            "parameters": "3 (surface + shock + vibration)",
-            "shock_unit": "m/s² (filtered)",
-            "vibration_unit": "deg/s (filtered)"
+            "image_optimization": "v2_thingsboard_fix"
         }
         
         # Add location if available
         if result['start_latitude'] and result['start_longitude']:
             thingsboard_payload["start_latitude"] = float(result['start_latitude'])
             thingsboard_payload["start_longitude"] = float(result['start_longitude'])
-            
-        if result['end_latitude'] and result['end_longitude']:
-            thingsboard_payload["end_latitude"] = float(result['end_latitude'])
-            thingsboard_payload["end_longitude"] = float(result['end_longitude'])
         
-        # Add image if available
-        if result['analysis_image']:
-            image_data = result['analysis_image']
+        # Proses gambar dengan strategi bertingkat
+        image_success = False
+        
+        if result['image_filename']:
+            image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
             
-            try:
-                import base64
-                test_decode = base64.b64decode(image_data[:100])
+            if os.path.exists(image_path):
+                print(f"📸 Processing image: {result['image_filename']}")
                 
-                if len(image_data) > 200000:
-                    thingsboard_payload["analysis_image_base64"] = image_data[:100000] + "...truncated"
-                    thingsboard_payload["has_image"] = True
-                    thingsboard_payload["image_truncated"] = True
-                else:
-                    thingsboard_payload["analysis_image_base64"] = image_data
-                    thingsboard_payload["has_image"] = True
-                    thingsboard_payload["image_truncated"] = False
+                # Coba kompres gambar untuk ThingsBoard
+                compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+                
+                if success and compressed_base64:
+                    # Strategi 1: Kirim gambar yang sudah dioptimasi
+                    thingsboard_payload.update({
+                        "analysis_image_base64": compressed_base64,
+                        "has_image": True,
+                        "image_format": "JPEG",
+                        "image_size_bytes": base64_size,
+                        "image_optimization_applied": True,
+                        "thingsboard_compatible": True
+                    })
+                    image_success = True
+                    print(f"✅ Image optimized for ThingsBoard: {base64_size} bytes")
                     
-            except Exception as e:
-                print(f"❌ Base64 validation failed: {e}")
-                thingsboard_payload["has_image"] = False
-                thingsboard_payload["image_error"] = str(e)
+                else:
+                    # Strategi 2: Kirim metadata tanpa gambar
+                    thingsboard_payload.update({
+                        "has_image": False,
+                        "image_error": "optimization_failed",
+                        "image_too_large": True,
+                        "original_filename": result['image_filename']
+                    })
+                    print(f"⚠️ Image too complex for ThingsBoard - sending metadata only")
+            else:
+                thingsboard_payload.update({
+                    "has_image": False,
+                    "image_error": "file_not_found"
+                })
+                print(f"❌ Image file not found: {image_path}")
         else:
-            thingsboard_payload["has_image"] = False
+            thingsboard_payload.update({
+                "has_image": False,
+                "image_error": "no_filename"
+            })
         
-        # Send to ThingsBoard
-        if send_to_thingsboard(thingsboard_payload, "road_damage_3param"):
-            print(f"✅ Data lengkap dengan gambar terkirim ke ThingsBoard (ID: {analysis_id}) - 3 parameters")
+        # Send ke ThingsBoard
+        success = send_to_thingsboard(thingsboard_payload, "road_damage_image_fixed")
+        
+        if success:
+            status = "with optimized image" if image_success else "metadata only"
+            print(f"✅ Analysis data sent to ThingsBoard ({status}) - ID: {analysis_id}")
             return True
         else:
-            print(f"❌ Gagal mengirim data lengkap ke ThingsBoard (ID: {analysis_id})")
+            print(f"❌ Failed to send data to ThingsBoard - ID: {analysis_id}")
             return False
             
-    except Error as e:
-        print(f"❌ Error sending complete data to ThingsBoard: {e}")
+    except Exception as e:
+        print(f"❌ Error in ThingsBoard image fix: {e}")
         return False
     finally:
         if connection.is_connected():
             cursor.close()
             connection.close()
+
+# UPDATE: Ganti fungsi yang lama
+def send_analysis_with_image_to_thingsboard(analysis_id):
+    """
+    UPDATED: Gunakan fungsi dengan image fix untuk ThingsBoard
+    """
+    return send_analysis_with_optimized_image_to_thingsboard(analysis_id)
+
+# Endpoint untuk testing image fix
+@app.route('/debug/thingsboard/image/test/<int:analysis_id>', methods=['GET'])
+def test_thingsboard_image_fix(analysis_id):
+    """Test image optimization untuk ThingsBoard"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        query = "SELECT image_filename FROM road_damage_analysis WHERE id = %s"
+        cursor.execute(query, (analysis_id,))
+        result = cursor.fetchone()
+        
+        if not result or not result['image_filename']:
+            return jsonify({"error": "Image not found for analysis"}), 404
+        
+        image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
+        
+        if not os.path.exists(image_path):
+            return jsonify({"error": "Image file not found on disk"}), 404
+        
+        # Test compression untuk ThingsBoard
+        compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+        original_size = os.path.getsize(image_path)
+        
+        test_result = {
+            "analysis_id": analysis_id,
+            "image_filename": result['image_filename'],
+            "original_size_bytes": original_size,
+            "original_size_kb": round(original_size/1024, 1),
+            "compressed_size_bytes": base64_size,
+            "compressed_size_kb": round(base64_size/1024, 1),
+            "compression_ratio": f"{base64_size/original_size*100:.1f}%" if original_size > 0 else "0%",
+            "thingsboard_compatible": success,
+            "max_allowed_size": THINGSBOARD_IMAGE_CONFIG['max_payload_size'],
+            "max_allowed_size_kb": round(THINGSBOARD_IMAGE_CONFIG['max_payload_size']/1024, 1),
+            "optimization_config": THINGSBOARD_IMAGE_CONFIG,
+            "status": "success" if success else "failed"
+        }
+        
+        return jsonify(test_result)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.route('/debug/thingsboard/image/retry/<int:analysis_id>', methods=['POST'])
+def retry_send_to_thingsboard(analysis_id):
+    """Retry sending analysis with image fix to ThingsBoard"""
+    try:
+        success = send_analysis_with_optimized_image_to_thingsboard(analysis_id)
+        
+        return jsonify({
+            "analysis_id": analysis_id,
+            "retry_success": success,
+            "timestamp": datetime.now().isoformat(),
+            "message": "Analysis resent with image optimization" if success else "Failed to resend analysis"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "analysis_id": analysis_id,
+            "retry_success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 @app.route('/analysis', methods=['GET'])
 def get_analysis():
@@ -1524,6 +1760,76 @@ def test_thingsboard():
         "parameters_status": "3 parameters enabled",
         "filters_status": "shock & vibration filters enabled"
     })
+
+@app.route('/debug/database/compress-images', methods=['POST'])
+def compress_existing_images():
+    """Kompresi ulang gambar yang sudah tersimpan di database"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        # Ambil semua analysis dengan gambar
+        query = """
+        SELECT id, image_filename, analysis_image 
+        FROM road_damage_analysis 
+        WHERE image_filename IS NOT NULL 
+        ORDER BY analysis_timestamp DESC
+        """
+        cursor.execute(query)
+        results = cursor.fetchall()
+        
+        compressed_count = 0
+        failed_count = 0
+        already_compressed_count = 0
+        
+        for result in results:
+            if result['image_filename'] and result['analysis_image']:
+                image_path = os.path.join(UPLOAD_FOLDER, result['image_filename'])
+                
+                if os.path.exists(image_path):
+                    # Cek ukuran current base64
+                    current_size = len(result['analysis_image'])
+                    
+                    # Jika sudah kecil, skip
+                    if current_size <= THINGSBOARD_IMAGE_CONFIG['max_payload_size']:
+                        already_compressed_count += 1
+                        continue
+                    
+                    # Kompres ulang
+                    compressed_base64, base64_size, success = compress_image_for_thingsboard(image_path)
+                    
+                    if success and compressed_base64:
+                        # Update database dengan gambar terkompresi
+                        update_query = "UPDATE road_damage_analysis SET analysis_image = %s WHERE id = %s"
+                        cursor.execute(update_query, (compressed_base64, result['id']))
+                        connection.commit()
+                        
+                        compressed_count += 1
+                        print(f"✅ Compressed analysis ID {result['id']}: {current_size} → {base64_size} bytes")
+                    else:
+                        failed_count += 1
+                        print(f"❌ Failed to compress analysis ID {result['id']}")
+                else:
+                    failed_count += 1
+                    print(f"❌ Image file not found for analysis ID {result['id']}")
+        
+        return jsonify({
+            "total_processed": len(results),
+            "compressed": compressed_count,
+            "failed": failed_count,
+            "already_compressed": already_compressed_count,
+            "message": f"Compressed {compressed_count} images successfully"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 if __name__ == '__main__':
     print("🚀 Road Monitoring Flask Server Starting...")
