@@ -16,15 +16,15 @@ SURFACE_CHANGE_THRESHOLDS = {
 # Accelerometer Shock Thresholds (m/s²)
 SHOCK_THRESHOLDS = {
     'light': 25.0,     # m/s² - guncangan ringan 
-    'moderate': 45.0,  # m/s² - guncangan sedang 
-    'heavy': 55.0      # m/s² - guncangan berat
+    'moderate': 42.0,  # m/s² - guncangan sedang 
+    'heavy': 50.0      # m/s² - guncangan berat
 }
 
 # Gyroscope Vibration Thresholds (deg/s)
 VIBRATION_THRESHOLDS = {
     'light': 12.0,    # deg/s - getaran ringan
     'moderate': 25.0, # deg/s - getaran sedang
-    'heavy': 35.0     # deg/s - getaran berat
+    'heavy': 40.0     # deg/s - getaran berat
 }
 
 # === FILTER GUNCANGAN KENDARAAN (SHOCK) ===
@@ -80,12 +80,12 @@ VEHICLE_VIBRATION_FILTER = {
 DAMAGE_CLASSIFICATION_3PARAM = {
     'rusak_berat': {
         'surface_change': 10.0,   # >= 10 cm
-        'shock': 55.0,           # >= 40.0 m/s² (filtered)
-        'vibration': 35.0,      # TURUN dari 200.0 -> 180.0 deg/s (calibrated + filtered)
+        'shock': 50.0,           # >= 40.0 m/s² (filtered)
+        'vibration': 40.0,      # TURUN dari 200.0 -> 180.0 deg/s (calibrated + filtered)
     },
     'rusak_sedang': {
         'surface_change': 6.0,   # >= 6 cm
-        'shock': 45.0,           # >= 30.0 m/s² (filtered)
+        'shock': 42.0,           # >= 30.0 m/s² (filtered)
         'vibration': 25.0,      # TURUN dari 150.0 -> 120.0 deg/s (calibrated + filtered)
     },
     'rusak_ringan': {
