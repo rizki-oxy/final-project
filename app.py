@@ -321,6 +321,46 @@ def filter_vehicle_vibration(vibrations, timestamps=None):
     
     return result
 
+def analyze_speed_data(data_points):
+    """Analisis data kecepatan untuk tracking dan informasi saja (bukan klasifikasi)"""
+    speeds = []
+    
+    for data in data_points:
+        speed = data.get('speed')  # km/h dari GPS
+        if speed is not None and speed >= 0:
+            speeds.append(speed)
+    
+    if not speeds:
+        return {
+            'speeds': speeds,
+            'avg_speed': 0,
+            'max_speed': 0,
+            'min_speed': 0,
+            'speed_range': "0 km/h",
+            'count': 0,
+            'has_speed_data': False
+        }
+    
+    avg_speed = sum(speeds) / len(speeds)
+    max_speed = max(speeds)
+    min_speed = min(speeds)
+    
+    # Format range kecepatan
+    if min_speed == max_speed:
+        speed_range = f"~{avg_speed:.1f} km/h"
+    else:
+        speed_range = f"{min_speed:.1f} - {max_speed:.1f} km/h"
+    
+    return {
+        'speeds': speeds,
+        'avg_speed': avg_speed,
+        'max_speed': max_speed,
+        'min_speed': min_speed,
+        'speed_range': speed_range,
+        'count': len(speeds),
+        'has_speed_data': True
+    }
+
 def send_to_thingsboard(payload_data, data_type="analysis"):
     """Mengirim data ke ThingsBoard via HTTP"""
     try:
@@ -830,6 +870,15 @@ def create_analysis_visualization(analysis_data):
     info_text += f"   Shock: {analysis_data['shock_analysis']['max_shock']:.1f}m/s²\n"
     info_text += f"   Vibration: {analysis_data['vibration_analysis']['max_vibration']:.1f}deg/s\n\n"
     
+    # TAMBAH SPEED INFO:
+    info_text += f"ESTIMASI KECEPATAN:\n"
+    if analysis_data['speed_analysis']['has_speed_data']:
+        info_text += f"   {analysis_data['speed_analysis']['speed_range']}\n"
+        info_text += f"   Rata-rata: {analysis_data['speed_analysis']['avg_speed']:.1f} km/h\n"
+        info_text += f"   Data GPS: {analysis_data['speed_analysis']['count']} points\n\n"
+    else:
+        info_text += f"   Data GPS tidak tersedia\n\n"
+    
     # Tambahkan info lokasi
     if analysis_data['start_location']:
         info_text += f"LOKASI AWAL:\n"
@@ -900,10 +949,12 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             damage_classification, damage_length, 
             surface_change_max, surface_change_avg, surface_change_count,
             shock_max, shock_avg, shock_count,
-            vibration_max, vibration_avg, vibration_count,
+            vibration_max, vibration_avg, vibration_count, 
+            speed_min, speed_max, speed_avg, speed_range, speed_data_count,
             anomalies, analysis_image, image_filename
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+            %s, %s, %s, %s, %s, %s, %s, %s
         )
         """
         
@@ -926,6 +977,11 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             analysis_data['vibration_analysis']['max_vibration'],
             analysis_data['vibration_analysis']['avg_vibration'],
             analysis_data['vibration_analysis']['count'],
+            analysis_data['speed_analysis']['min_speed'] if analysis_data['speed_analysis']['has_speed_data'] else None,
+            analysis_data['speed_analysis']['max_speed'] if analysis_data['speed_analysis']['has_speed_data'] else None,
+            analysis_data['speed_analysis']['avg_speed'] if analysis_data['speed_analysis']['has_speed_data'] else None,
+            analysis_data['speed_analysis']['speed_range'] if analysis_data['speed_analysis']['has_speed_data'] else None,
+            analysis_data['speed_analysis']['count'],
             json.dumps(analysis_data['anomalies']),
             image_data,  # PNG base64 asli (tidak dikompres)
             image_filename
@@ -995,6 +1051,16 @@ def perform_30s_analysis():
     surface_analysis = analyze_surface_changes(data_points)
     shock_analysis = analyze_shocks(data_points)        # m/s² dengan filter
     vibration_analysis = analyze_vibrations(data_points) # deg/s dengan filter
+    speed_analysis = analyze_speed_data(data_points)
+    
+    print(f"📊 Speed Info:")
+    if speed_analysis['has_speed_data']:
+        print(f"   - Speed Range: {speed_analysis['speed_range']}")
+        print(f"   - Average: {speed_analysis['avg_speed']:.1f} km/h")
+        print(f"   - Data Points: {speed_analysis['count']}")
+    else:
+        print(f"   - No GPS speed data available")
+    
     anomalies = detect_anomalies(data_points)
     
     # Tentukan lokasi awal dan akhir
@@ -1034,6 +1100,7 @@ def perform_30s_analysis():
             'surface_analysis': surface_analysis,
             'shock_analysis': shock_analysis,
             'vibration_analysis': vibration_analysis,
+            'speed_analysis': speed_analysis,
             'damage_length': damage_length,
             'anomalies': anomalies,
             'damage_classification': damage_classification,
@@ -1402,6 +1469,11 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             "surface_change_max": float(result['surface_change_max']) if result['surface_change_max'] else 0,
             "shock_max_ms2": float(result['shock_max']) if result['shock_max'] else 0,
             "vibration_max_dps": float(result['vibration_max']) if result['vibration_max'] else 0,
+            "speed_min_kmh": float(result['speed_min']) if result['speed_min'] else None,
+    "speed_max_kmh": float(result['speed_max']) if result['speed_max'] else None,
+    "speed_avg_kmh": float(result['speed_avg']) if result['speed_avg'] else None,
+    "speed_range": result['speed_range'] if result['speed_range'] else "No GPS data",
+    "speed_data_points": int(result['speed_data_count']) if result['speed_data_count'] else 0,
             "damage_detected": True,
             "compression_strategy": "file_to_thingsboard_only"
         }
@@ -1606,6 +1678,7 @@ def get_analysis():
             analysis['surface_unit'] = 'cm'
             analysis['shock_unit'] = 'm/s² (filtered)'
             analysis['vibration_unit'] = 'deg/s (filtered)'
+            analysis['speed_unit'] = 'km/h (GPS estimated)'
         
         return jsonify({
             "total": total_count,
@@ -1615,6 +1688,7 @@ def get_analysis():
                 "surface_unit": "cm",
                 "shock_unit": "m/s² (filtered)",
                 "vibration_unit": "deg/s (filtered)",
+                "speed_unit": "km/h (GPS estimated)",
                 "note": "3 parameters with vehicle & slope filters"
             }
         })
@@ -1648,7 +1722,10 @@ def get_summary():
             MAX(shock_max) as max_shock_ms2,
             AVG(shock_max) as avg_shock_ms2,
             MAX(vibration_max) as max_vibration_dps,
-            AVG(vibration_max) as avg_vibration_dps
+            AVG(vibration_max) as avg_vibration_dps,
+            AVG(speed_avg) as avg_speed_kmh,
+            MAX(speed_max) as max_speed_kmh,
+            MIN(speed_min) as min_speed_kmh
         FROM road_damage_analysis 
         GROUP BY damage_classification
         """
@@ -1660,7 +1737,7 @@ def get_summary():
         recent_query = """
         SELECT analysis_timestamp, damage_classification, damage_length, 
                start_latitude, start_longitude, end_latitude, end_longitude,
-               surface_change_max, shock_max, vibration_max
+               surface_change_max, shock_max, vibration_max, speed_avg, speed_range
         FROM road_damage_analysis 
         ORDER BY analysis_timestamp DESC 
         LIMIT 10
@@ -1677,6 +1754,7 @@ def get_summary():
                 "surface_change": "cm",
                 "shock": "m/s² (filtered)",
                 "vibration": "deg/s (filtered)",
+                "speed": "km/h (GPS estimated)",
                 "damage_length": "meters"
             },
             "parameters_note": "3 parameters: surface + shock + vibration with filters"
