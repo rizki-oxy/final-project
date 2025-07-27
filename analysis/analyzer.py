@@ -277,6 +277,7 @@ def perform_30s_analysis():
         return
     
     data_points = buffer.data_buffer.get_data()
+    print(f"🔎🪲  DEBUG: MIN_DATA_POINTS = {MIN_DATA_POINTS}, data_buffer_count = {len(data_points)}")
     
     if len(data_points) < MIN_DATA_POINTS:
         print(f"⏳ Data tidak cukup untuk analisis: {len(data_points)}/{MIN_DATA_POINTS}")

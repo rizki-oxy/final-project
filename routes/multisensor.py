@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime
 import time
 import threading
+from thresholds import MIN_DATA_POINTS
 
 from analysis.buffer import data_buffer
 from analysis.analyzer import perform_30s_analysis
@@ -97,10 +98,12 @@ def multisensor():
     
     # Cek apakah sudah waktunya untuk analisis 30 detik
     if (current_time - buffer.last_analysis_time) >= ANALYSIS_INTERVAL:
-        # Jalankan analisis di thread terpisah agar tidak blocking
-        analysis_thread = threading.Thread(target=perform_30s_analysis)
-        analysis_thread.daemon = True
-        analysis_thread.start()
+        if data_buffer.get_data_count() >= MIN_DATA_POINTS:
+            analysis_thread = threading.Thread(target=perform_30s_analysis)
+            analysis_thread.daemon = True
+            analysis_thread.start()
+        else:
+            print(f"⚠️ Skip analisis: data belum cukup ({data_buffer.get_data_count()}/{MIN_DATA_POINTS})")
     
     return jsonify({
         "status": "success",
