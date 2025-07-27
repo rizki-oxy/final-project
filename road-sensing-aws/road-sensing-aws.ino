@@ -2,14 +2,10 @@
 #include <TinyGPS++.h>
 #include <Wire.h>
 #include <HTTPClient.h>
-#include <PubSubClient.h>
 
-// WiFi & MQTT Configuration
+// WiFi Configuration
 const char* ssid = "fff";
 const char* password = "halo1234000";
-// const char* mqtt_server = "192.168.43.18";
-const char* mqtt_server = "54.83.79.159";
-const int mqtt_port = 1883;
 // const char* access_token = "0939gxC3IXo3uoCIgAED";
 const char* access_token = "2hC5cgrmqIItWjiD9dGe";
 
@@ -20,14 +16,7 @@ const char* thingsboard_server = "54.83.79.159";
 const int thingsboard_port = 8080;
 const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
 
-WiFiClient espClient;
-PubSubClient client(espClient);
-
 // Communication status tracking
-bool mqttConnected = false;
-unsigned long lastMqttAttempt = 0;
-const unsigned long mqttRetryInterval = 5000;
-unsigned long mqttFailCount = 0;
 unsigned long httpSuccessCount = 0;
 unsigned long httpFailCount = 0;
 
@@ -130,7 +119,7 @@ void setup() {
   
   Serial.println("\n=== ESP32 Multi-Sensor System (Shock & Vibration Detection) ===");
   Serial.println("GPS + GY-521 + Ultrasonic Array");
-  Serial.println("MQTT + HTTP Backup Communication");
+  Serial.println("HTTP Communication");
   Serial.println("GY-521: Raw data + Converted to m/s² and deg/s");
   Serial.println("NEW: Shock (accelerometer) + Vibration (gyroscope) Detection");
   Serial.println("CALIBRATED: Gyroscope offset calibration enabled"); // TAMBAHAN BARU
@@ -149,10 +138,7 @@ void setup() {
   // Initialize WiFi
   setup_wifi();
   
-  // Initialize MQTT
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(mqttCallback);
-  
+ 
   // Initialize I2C for MPU6050
   Wire.begin(SDA_PIN, SCL_PIN);
   
@@ -194,7 +180,7 @@ void setup() {
   Serial.println("✅ Ultrasonic sensors initialized!");
   
   Serial.println("\n--- MULTI-SENSOR MONITORING STARTED ---");
-  Serial.println("📡 Communication: MQTT Primary + HTTP Backup");
+  Serial.println("📡 Communication: HTTP");
   Serial.println("🔄 GY-521: LSB → g → m/s² conversion enabled");
   Serial.println("📳 Shock: Accelerometer magnitude changes (m/s²)");
   Serial.println("🔄 Vibration: Gyroscope magnitude (deg/s) - CALIBRATED"); // TAMBAHAN BARU
@@ -262,10 +248,7 @@ void resetGyroCalibration() {
 
 void loop() {
   unsigned long currentTime = millis();
-  
-  // Handle MQTT connection with retry logic
-  handleMqttConnection();
-  
+   
   // Process GPS data continuously
   processGPSData(currentTime);
   
@@ -313,35 +296,6 @@ void setup_wifi() {
   } else {
     Serial.println("\n⚠️ WiFi gagal terhubung!");
   }
-}
-
-void handleMqttConnection() {
-  if (!client.connected()) {
-    mqttConnected = false;
-    unsigned long currentTime = millis();
-    
-    if (currentTime - lastMqttAttempt >= mqttRetryInterval) {
-      Serial.print("🔄 Mencoba koneksi MQTT...");
-      if (client.connect("ESP32MultiSensor", access_token, NULL)) {
-        Serial.println(" ✅ MQTT terhubung");
-        mqttConnected = true;
-        mqttFailCount = 0;
-      } else {
-        Serial.print(" ❌ MQTT gagal, rc=");
-        Serial.println(client.state());
-        mqttFailCount++;
-        Serial.println("⚠️ Akan menggunakan HTTP backup");
-      }
-      lastMqttAttempt = currentTime;
-    }
-  } else {
-    mqttConnected = true;
-    client.loop();
-  }
-}
-
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // Handle MQTT messages if needed
 }
 
 void processSensorData() {
@@ -598,27 +552,15 @@ void sendAllSensorData() {
   sendToFlaskServer(flaskPayload);
   
   // Send to ThingsBoard with fallback logic
-  bool mqttSuccess = false;
   bool httpSuccess = false;
   
-  // Try MQTT first
-  if (mqttConnected) {
-    mqttSuccess = sendDataViaMqtt(tbPayload);
-  }
-  
-  // If MQTT failed or not connected, use HTTP backup
-  if (!mqttSuccess) {
-    Serial.println("📡 Menggunakan HTTP backup...");
-    httpSuccess = sendDataViaHttp(tbPayload);
-  }
+  httpSuccess = sendDataViaHttp(tbPayload);
   
   // Status reporting
-  if (mqttSuccess) {
-    Serial.println("📊 Status: MQTT ✅");
-  } else if (httpSuccess) {
-    Serial.println("📊 Status: HTTP Backup ✅");
+  if (httpSuccess) {
+    Serial.println("📊 Status: HTTP ✅");
   } else {
-    Serial.println("📊 Status: Semua komunikasi gagal ❌");
+    Serial.println("📊 Status: HTTP gagal ❌");
   }
   
   // Print communication statistics every 10 sends
@@ -743,20 +685,6 @@ String createFlaskPayload() {
   return payload;
 }
 
-bool sendDataViaMqtt(String payload) {
-  if (!mqttConnected || !client.connected()) {
-    return false;
-  }
-  
-  bool success = client.publish("v1/devices/me/telemetry", payload.c_str());
-  if (success) {
-    Serial.println("✅ MQTT: Data terkirim");
-  } else {
-    Serial.println("❌ MQTT: Gagal kirim data");
-    mqttConnected = false;
-  }
-  return success;
-}
 
 bool sendDataViaHttp(String payload) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -804,10 +732,6 @@ void sendToFlaskServer(String payload) {
 
 void printCommunicationStats() {
   Serial.println("\n📊 === COMMUNICATION STATISTICS ===");
-  Serial.print("MQTT Status: ");
-  Serial.println(mqttConnected ? "✅ Connected" : "❌ Disconnected");
-  Serial.print("MQTT Fail Count: ");
-  Serial.println(mqttFailCount);
   Serial.print("HTTP Success Count: ");
   Serial.println(httpSuccessCount);
   Serial.print("HTTP Fail Count: ");
