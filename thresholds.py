@@ -1,26 +1,25 @@
 # Ultrasonic Sensor Thresholds
 SURFACE_CHANGE_THRESHOLDS = {
     'minor': 2.0,      # cm - perubahan kecil
-    'moderate': 6.0,   # cm - perubahan sedang
+    'moderate': 5.0,   # cm - perubahan sedang
     'major': 10.0       # cm - perubahan besar
 }
 
-# Accelerometer Shock Thresholds (m/s²)
+# Accelerometer Shock Thresholds (ms2)
 SHOCK_THRESHOLDS = {
-    'light': 25.0,     # m/s² - guncangan ringan 
-    'moderate': 42.0,  # m/s² - guncangan sedang 
-    'heavy': 50.0      # m/s² - guncangan berat
+    'light': 25.0,     # ms2 - r
+    'moderate': 40.0,  # ms2 - s
+    'heavy': 50.0      # ms2 - b
 }
 
 # Gyroscope Vibration Thresholds (deg/s)
 VIBRATION_THRESHOLDS = {
-    'light': 12.0,    # deg/s - getaran ringan
-    'moderate': 25.0, # deg/s - getaran sedang
-    'heavy': 40.0     # deg/s - getaran berat
+    'light': 12.0,    # deg/s - r
+    'moderate': 25.0, # deg/s - s
+    'heavy': 40.0     # deg/s - b
 }
 
-# FILTER GUNCANGAN KENDARAAN (SHOCK)
-# Parameter untuk membedakan guncangan motor vs guncangan jalan rusak
+# FILTER GUNCANGAN KENDARAAN (SHOCK) - parameter untuk membedakan guncangan motor vs guncangan jalan rusak
 VEHICLE_SHOCK_FILTER = {
     # Range guncangan normal kendaraan bermotor (dalam m/s²)
     'baseline_min': 0.5,    # m/s² - guncangan minimum kendaraan idle
@@ -39,8 +38,7 @@ VEHICLE_SHOCK_FILTER = {
     'min_samples': 3        # minimum data point untuk analisis
 }
 
-# FILTER GETARAN KENDARAAN (VIBRATION)
-# Parameter untuk membedakan getaran motor vs getaran jalan rusak vs tanjakan/turunan
+# FILTER GETARAN KENDARAAN (VIBRATION) Parameter untuk membedakan getaran motor vs getaran jalan rusak vs tanjakan/turunan
 VEHICLE_VIBRATION_FILTER = {
     # Range getaran normal kendaraan bermotor (dalam deg/s)
     'baseline_min': 0.0,    
@@ -76,8 +74,8 @@ DAMAGE_CLASSIFICATION_3PARAM = {
         'vibration': 40.0,      # deg/s (filtered)
     },
     'rusak_sedang': {
-        'surface_change': 6.0,   
-        'shock': 42.0,           # m/s² (filtered)
+        'surface_change': 5.0,   
+        'shock': 40.0,           # m/s² (filtered)
         'vibration': 25.0,      # deg/s (filtered)
     },
     'rusak_ringan': {
@@ -88,11 +86,8 @@ DAMAGE_CLASSIFICATION_3PARAM = {
 }
 
 # PARAMETER ANALISIS
-
 MIN_DATA_POINTS = 5  # Minimum data points untuk analisis valid
-
 MAX_GPS_GAP = 50.0  # Maximum gap antara data points GPS untuk kontinuitas (meter)
-
 
 # PARAMETER GPS
 EARTH_RADIUS = 6371000  # Radius bumi untuk perhitungan jarak (meter)
