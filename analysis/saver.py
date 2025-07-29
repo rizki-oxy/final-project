@@ -16,7 +16,7 @@ from core.thingsboard import send_analysis_with_optimized_image_to_thingsboard
 
 
 def save_sensor_data(data):
-    """Menyimpan data sensor mentah ke database - UPDATED untuk shock dan vibration"""
+    """Menyimpan data sensor mentah ke database"""
     connection = get_db_connection()
     if not connection:
         return False
@@ -109,7 +109,7 @@ def save_sensor_data(data):
             connection.close()
 
 def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
-    """Menyimpan hasil analisis ke database - FIXED: database tetap PNG asli"""
+    """Menyimpan hasil analisis ke database"""
     
     # Cek apakah ada kerusakan
     if not analysis_data.get('has_damage', False):
@@ -124,7 +124,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
     try:
         cursor = connection.cursor()
         
-        # FIXED: Database tetap simpan PNG asli (tidak dikompres)
+        # Database simpan PNG
         image_data = None
         if image_path and os.path.exists(image_path):
             print(f"📸 Saving original PNG to database: {image_filename}")
@@ -135,7 +135,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
             
             original_size = len(image_data)
             print(f"💾 Original PNG saved to database: {original_size} bytes ({original_size/1024:.1f}KB)")
-            print(f"📡 ThingsBoard akan menerima versi terkompresi saat dikirim")
+            print(f"📡 ThingsBoard akan menerima versi terkompresi")
         
         insert_query = """
         INSERT INTO road_damage_analysis (
@@ -212,7 +212,7 @@ def save_analysis_to_database(analysis_data, image_path=None, image_filename=Non
 
 def send_analysis_with_image_to_thingsboard(analysis_id):
     """
-    UPDATED: Gunakan fungsi dengan image fix untuk ThingsBoard
+    Gunakan fungsi dengan image fix untuk ThingsBoard
     """
     return send_analysis_with_optimized_image_to_thingsboard(analysis_id)
 
