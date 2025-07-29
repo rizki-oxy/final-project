@@ -15,8 +15,74 @@ analysis_bp = Blueprint('analysis', __name__)
 
 @analysis_bp.route('/analysis', methods=['GET'])
 def get_analysis():
-    """Ambil data analisis dari database"""
-    ...
+    """Endpoint untuk mengambil data analisis dari database"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    try:
+        cursor = connection.cursor(dictionary=True)
+        
+        # Parameter query
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        classification = request.args.get('classification', None)
+        
+        # Base query
+        base_query = "SELECT * FROM road_damage_analysis"
+        count_query = "SELECT COUNT(*) as total FROM road_damage_analysis"
+        
+        # Filter
+        where_clause = ""
+        params = []
+        if classification:
+            where_clause = " WHERE damage_classification = %s"
+            params = [classification]
+        
+        # Get total count
+        cursor.execute(count_query + where_clause, params)
+        total_count = cursor.fetchone()['total']
+        
+        # Get data
+        main_query = base_query + where_clause + " ORDER BY analysis_timestamp DESC LIMIT %s OFFSET %s"
+        cursor.execute(main_query, params + [limit, offset])
+        
+        analyses = cursor.fetchall()
+        
+        # Parse JSON anomalies and add unit info
+        for analysis in analyses:
+            if analysis['anomalies']:
+                try:
+                    analysis['anomalies'] = json.loads(analysis['anomalies'])
+                except json.JSONDecodeError:
+                    analysis['anomalies'] = []
+            
+            # Add unit information
+            analysis['surface_unit'] = 'cm'
+            analysis['shock_unit'] = 'm/s² (filtered)'
+            analysis['vibration_unit'] = 'deg/s (filtered)'
+            analysis['speed_unit'] = 'km/h (GPS estimated)'
+        
+        return jsonify({
+            "total": total_count,
+            "count": len(analyses),
+            "analyses": analyses,
+            "parameters_info": {
+                "surface_unit": "cm",
+                "shock_unit": "m/s² (filtered)",
+                "vibration_unit": "deg/s (filtered)",
+                "speed_unit": "km/h (GPS estimated)",
+                "note": "3 parameters with vehicle & slope filters"
+            }
+        })
+        
+    except Error as e:
+        print(f"❌ Error fetching analyses: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 @analysis_bp.route('/summary', methods=['GET'])
 def get_summary():
