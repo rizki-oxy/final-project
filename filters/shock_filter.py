@@ -9,16 +9,6 @@ from analysis.classifier import (
 )
 
 def filter_vehicle_shock(shocks, timestamps=None):
-    """
-    Filter guncangan kendaraan bermotor dari guncangan jalan rusak
-    
-    Args:
-        shocks (list): List guncangan dalam m/s²
-        timestamps (list): List timestamp untuk analisis pola (optional)
-    
-    Returns:
-        dict: Hasil filter dengan guncangan yang sudah dibersihkan
-    """
     if not shocks or len(shocks) < 3:
         return {
             'filtered_shocks': shocks,

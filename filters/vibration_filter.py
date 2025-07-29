@@ -9,17 +9,6 @@ from analysis.classifier import (
 )
 
 def filter_vehicle_vibration(vibrations, timestamps=None):
-    """
-    Filter getaran kendaraan bermotor dari getaran jalan rusak
-    Untuk gyroscope dalam deg/s dengan filter untuk tanjakan/turunan
-    
-    Args:
-        vibrations (list): List getaran dalam deg/s
-        timestamps (list): List timestamp untuk analisis pola (optional)
-    
-    Returns:
-        dict: Hasil filter dengan getaran yang sudah dibersihkan
-    """
     if not vibrations or len(vibrations) < 3:
         return {
             'filtered_vibrations': vibrations,
