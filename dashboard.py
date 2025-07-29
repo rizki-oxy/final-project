@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE 1: dashboard.py (Buat file baru)
-# ============================================================================
-
 from flask import Blueprint, render_template, request, jsonify, send_file, make_response
 import mysql.connector
 from mysql.connector import Error
