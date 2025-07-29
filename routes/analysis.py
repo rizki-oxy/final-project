@@ -20,7 +20,7 @@ def get_analysis():
 
 @analysis_bp.route('/summary', methods=['GET'])
 def get_summary():
-    """Endpoint untuk mendapatkan ringkasan data kerusakan jalan - UPDATED 3 parameter"""
+    """Endpoint untuk mendapatkan ringkasan data kerusakan jalan"""
     connection = get_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
