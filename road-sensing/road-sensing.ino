@@ -14,6 +14,7 @@ const int thingsboard_port = 8081;
 const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
 
 // Communication status tracking
+unsigned long lastReconnectAttempt = 0;
 unsigned long httpSuccessCount = 0;
 unsigned long httpFailCount = 0;
 
@@ -112,6 +113,7 @@ const unsigned long dataSendInterval = 2000;
 
 void setup() {
   Serial.begin(115200);
+  setup_wifi();
   delay(1000);
   
   Serial.println("\n=== ESP32 Multi-Sensor System (Shock & Vibration Detection) ===");
@@ -133,7 +135,7 @@ void setup() {
   }
   
   // Initialize WiFi
-  setup_wifi();
+  // setup_wifi();
   
   // Initialize I2C for MPU6050
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -244,7 +246,14 @@ void resetGyroCalibration() {
 
 void loop() {
   unsigned long currentTime = millis();
-   
+  if (currentTime - lastReconnectAttempt > 10000) {
+    if (!reconnect_wifi_if_needed()) {
+      Serial.println("⚠️ WiFi tidak terhubung, menghentikan pengumpulan data.");
+      lastReconnectAttempt = currentTime;
+      return; // Keluar dari loop jika WiFi tidak terhubung
+    }
+    lastReconnectAttempt = currentTime;
+  }
   // Process GPS data continuously
   processGPSData(currentTime);
   
@@ -276,22 +285,43 @@ void loop() {
 }
 
 void setup_wifi() {
-  Serial.print("🔌 Menghubungkan ke WiFi...");
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   
-  unsigned long wifiStartTime = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStartTime < 15000) {
+  Serial.print("🔌 Menghubungkan ke WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ WiFi terhubung!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\n⚠️ WiFi gagal terhubung!");
+    
+  Serial.println("\n✅ WiFi terhubung!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+bool reconnect_wifi_if_needed() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ WiFi terputus! Mencoba reconnect...");
+    WiFi.disconnect();  
+    WiFi.begin(ssid, password);
+
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✅ WiFi tersambung ulang!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      return true;
+    } else {
+      Serial.println("\n❌ Gagal reconnect. Akan coba lagi nanti.");
+      return false;
+    }
   }
+  return true;
 }
 
 void processSensorData() {
