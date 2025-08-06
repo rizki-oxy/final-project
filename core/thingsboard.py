@@ -7,6 +7,23 @@ import os
 from core.database import get_db_connection
 from core.config import UPLOAD_FOLDER, THINGSBOARD_IMAGE_CONFIG, THINGSBOARD_CONFIG, THINGSBOARD_URL
 
+def test_thingsboard_conn():
+    # Test ThingsBoard connection
+    test_payload = {
+        "startup_test": "Flask server starting with 3 parameters",
+        "startup_timestamp": datetime.now().isoformat(),
+        "parameters": "surface + shock + vibration",
+        "shock_unit": "m/s² (filtered)",
+        "vibration_unit": "deg/s (filtered)",
+        "filters": "shock & vibration filters enabled"
+    }
+    
+    if send_to_thingsboard(test_payload, "startup_test"):
+        print("✅ ThingsBoard connection successful")
+    else:
+        print("⚠️ ThingsBoard connection failed - check configuration")
+    
+
 def send_to_thingsboard(payload_data, data_type="analysis"):
     """Mengirim data ke ThingsBoard via HTTP"""
     try:
