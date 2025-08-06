@@ -32,13 +32,11 @@ if __name__ == '__main__':
     print("🚀 Road Monitoring Flask Server Starting...")
     print("=" * 60)
     print("⏳ HARDWARE WARMING UP PERIOD:")
-    print(f"   - Skip first {INITIAL_SKIP_PERIOD} seconds after ESP32 connects")
-    print(f"   - Warming up starts when first data received")
+    print(f"   - Skip Data | {INITIAL_SKIP_PERIOD} detik setelah ESP32 terhubung")
     print("=" * 60)
-    print("🔗 ThingsBoard Integration:")
+    print("🟢 ThingsBoard Integration:")
     print(f"   - Server: {THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}")
     print(f"   - URL: {THINGSBOARD_URL}")
-    print(f"   - Data Prefix: fls_ (Flask)")
     print("=" * 60)
 
     # Test database connection
@@ -47,7 +45,7 @@ if __name__ == '__main__':
         print("✅ Database connection successful")
         test_conn.close()
     else:
-        print("❌ Database connection failed - check configuration")
+        print("❌ Database connection failed")
         exit(1)
 
     
@@ -66,12 +64,9 @@ if __name__ == '__main__':
     else:
         print("⚠️ ThingsBoard connection failed - check configuration")
     
-    # Start server
-    flask_host = os.getenv('FLASK_HOST', '0.0.0.0')
-    flask_port = int(os.getenv('FLASK_PORT', 5000))
-    flask_debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
+    from core.config import FLASK_CONFIG
        
-    print(f"🌐 Server running on http://{flask_host}:{flask_port}")
+    print(f"🌐 Server running on http://{FLASK_CONFIG['host']}:{FLASK_CONFIG['port']}")
     print("=" * 60)
     
-    app.run(host=flask_host, port=flask_port, debug=flask_debug)
+    app.run(**FLASK_CONFIG)

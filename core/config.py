@@ -16,10 +16,13 @@ DB_CONFIG = {
 
 # ThingsBoard Configuration
 THINGSBOARD_CONFIG = {
-    'server': os.getenv('THINGSBOARD_SERVER', '192.168.43.18'),
-    'port': os.getenv('THINGSBOARD_PORT', '8081'),
-    'access_token': os.getenv('THINGSBOARD_ACCESS_TOKEN', '0939gxC3IXo3uoCIgAED')
+    'server': os.getenv('THINGSBOARD_SERVER'),
+    'port': os.getenv('THINGSBOARD_PORT'),
+    'access_token': os.getenv('THINGSBOARD_ACCESS_TOKEN')
 }
+
+# Build ThingsBoard URL
+THINGSBOARD_URL = f"http://{THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}/api/v1/{THINGSBOARD_CONFIG['access_token']}/telemetry"
 
 # Konfigurasi untuk ThingsBoard image compatibility
 THINGSBOARD_IMAGE_CONFIG = {
@@ -30,8 +33,11 @@ THINGSBOARD_IMAGE_CONFIG = {
     'format': 'JPEG'            # Format yang lebih efisien daripada PNG
 }
 
-# Build ThingsBoard URL
-THINGSBOARD_URL = f"http://{THINGSBOARD_CONFIG['server']}:{THINGSBOARD_CONFIG['port']}/api/v1/{THINGSBOARD_CONFIG['access_token']}/telemetry"
+FLASK_CONFIG = {
+    'host': os.getenv('FLASK_HOST'),
+    'port': int(os.getenv('FLASK_PORT')),
+    'debug': os.getenv('FLASK_DEBUG', 'True').lower()=="true",
+}
 
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'static')
 if not os.path.exists(UPLOAD_FOLDER):
