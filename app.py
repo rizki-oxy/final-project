@@ -1,13 +1,15 @@
 from flask import Flask
 import matplotlib
 matplotlib.use('Agg')
+import os
+from datetime import datetime
 from core.config import (
-    FLASK_CONFIG, THINGSBOARD_URL, THINGSBOARD_CONFIG
+    DB_CONFIG, FLASK_CONFIG, THINGSBOARD_URL, THINGSBOARD_IMAGE_CONFIG, UPLOAD_FOLDER, THINGSBOARD_CONFIG
 )
-from core.database import test_database_connection
+from core.database import get_db_connection, test_database_connection
 
 from core.thingsboard import (
-    test_thingsboard_conn
+    send_to_thingsboard, compress_image_for_thingsboard, test_thingsboard_conn
 )
 from thresholds import (
     ANALYSIS_INTERVAL
@@ -40,7 +42,7 @@ if __name__ == '__main__':
     print("=" * 60)
 
     # Test koneksi database
-    test_database_connection()
+    test_database_connection
 
     # Test koneksi ThingsBoard
     test_thingsboard_conn()
