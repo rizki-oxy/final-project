@@ -15,98 +15,98 @@ from core.config import (
 from core.thingsboard import send_analysis_with_optimized_image_to_thingsboard
 
 
-def save_sensor_data(data):
-    """Menyimpan data sensor mentah ke database"""
-    connection = get_db_connection()
-    if not connection:
-        return False
+# def save_sensor_data(data):
+#     """Menyimpan data sensor mentah ke database"""
+#     connection = get_db_connection()
+#     if not connection:
+#         return False
     
-    try:
-        cursor = connection.cursor()
+#     try:
+#         cursor = connection.cursor()
         
-        insert_query = """
-        INSERT INTO sensor_data (
-            timestamp, 
-            sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
-            sensor5_distance, sensor6_distance, sensor7_distance, sensor8_distance,
-            accel_x, accel_y, accel_z, accel_magnitude,
-            accel_x_ms2, accel_y_ms2, accel_z_ms2, accel_magnitude_ms2,
-            gyro_x, gyro_y, gyro_z, rotation_magnitude,
-            gyro_x_dps, gyro_y_dps, gyro_z_dps, rotation_magnitude_dps,
-            shock_magnitude, vibration_magnitude,
-            latitude, longitude, speed, satellites
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
-        )
-        """
+#         insert_query = """
+#         INSERT INTO sensor_data (
+#             timestamp, 
+#             sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
+#             sensor5_distance, sensor6_distance, sensor7_distance, sensor8_distance,
+#             accel_x, accel_y, accel_z, accel_magnitude,
+#             accel_x_ms2, accel_y_ms2, accel_z_ms2, accel_magnitude_ms2,
+#             gyro_x, gyro_y, gyro_z, rotation_magnitude,
+#             gyro_x_dps, gyro_y_dps, gyro_z_dps, rotation_magnitude_dps,
+#             shock_magnitude, vibration_magnitude,
+#             latitude, longitude, speed, satellites
+#         ) VALUES (
+#             %s, %s, %s, %s, %s, %s, %s, %s, %s,
+#             %s, %s, %s, %s, %s, %s, %s, %s,
+#             %s, %s, %s, %s, %s, %s, %s, %s,
+#             %s, %s, %s, %s, %s, %s
+#         )
+#         """
         
-        # Calculate magnitudes dari raw data jika belum ada
-        accel_magnitude = None
-        if all(data.get(key) is not None for key in ['accelX', 'accelY', 'accelZ']):
-            accel_magnitude = math.sqrt(data['accelX']**2 + data['accelY']**2 + data['accelZ']**2)
+#         # Calculate magnitudes dari raw data jika belum ada
+#         accel_magnitude = None
+#         if all(data.get(key) is not None for key in ['accelX', 'accelY', 'accelZ']):
+#             accel_magnitude = math.sqrt(data['accelX']**2 + data['accelY']**2 + data['accelZ']**2)
         
-        rotation_magnitude = None
-        if all(data.get(key) is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
-            rotation_magnitude = math.sqrt(
-                (data['gyroX']/131.0)**2 + (data['gyroY']/131.0)**2 + (data['gyroZ']/131.0)**2
-            )
+#         rotation_magnitude = None
+#         if all(data.get(key) is not None for key in ['gyroX', 'gyroY', 'gyroZ']):
+#             rotation_magnitude = math.sqrt(
+#                 (data['gyroX']/131.0)**2 + (data['gyroY']/131.0)**2 + (data['gyroZ']/131.0)**2
+#             )
         
-        # Calculate converted magnitudes
-        accel_magnitude_ms2 = None
-        if all(data.get(key) is not None for key in ['accelX_ms2', 'accelY_ms2', 'accelZ_ms2']):
-            accel_magnitude_ms2 = math.sqrt(
-                data['accelX_ms2']**2 + data['accelY_ms2']**2 + data['accelZ_ms2']**2
-            )
-        elif data.get('accel_magnitude_ms2') is not None:
-            accel_magnitude_ms2 = data['accel_magnitude_ms2']
+#         # Calculate converted magnitudes
+#         accel_magnitude_ms2 = None
+#         if all(data.get(key) is not None for key in ['accelX_ms2', 'accelY_ms2', 'accelZ_ms2']):
+#             accel_magnitude_ms2 = math.sqrt(
+#                 data['accelX_ms2']**2 + data['accelY_ms2']**2 + data['accelZ_ms2']**2
+#             )
+#         elif data.get('accel_magnitude_ms2') is not None:
+#             accel_magnitude_ms2 = data['accel_magnitude_ms2']
         
-        rotation_magnitude_dps = None
-        if all(data.get(key) is not None for key in ['gyroX_dps', 'gyroY_dps', 'gyroZ_dps']):
-            rotation_magnitude_dps = math.sqrt(
-                data['gyroX_dps']**2 + data['gyroY_dps']**2 + data['gyroZ_dps']**2
-            )
-        elif data.get('rotation_magnitude_dps') is not None:
-            rotation_magnitude_dps = data['rotation_magnitude_dps']
+#         rotation_magnitude_dps = None
+#         if all(data.get(key) is not None for key in ['gyroX_dps', 'gyroY_dps', 'gyroZ_dps']):
+#             rotation_magnitude_dps = math.sqrt(
+#                 data['gyroX_dps']**2 + data['gyroY_dps']**2 + data['gyroZ_dps']**2
+#             )
+#         elif data.get('rotation_magnitude_dps') is not None:
+#             rotation_magnitude_dps = data['rotation_magnitude_dps']
         
-        insert_data = (
-            datetime.now(),
-            # Ultrasonic data
-            data.get('sensor1'), data.get('sensor2'), data.get('sensor3'), data.get('sensor4'),
-            data.get('sensor5'), data.get('sensor6'), data.get('sensor7'), data.get('sensor8'),
-            # Raw accelerometer data
-            data.get('accelX'), data.get('accelY'), data.get('accelZ'), accel_magnitude,
-            # Converted accelerometer data (m/s²)
-            data.get('accelX_ms2'), data.get('accelY_ms2'), data.get('accelZ_ms2'), accel_magnitude_ms2,
-            # Raw gyroscope data  
-            data.get('gyroX'), data.get('gyroY'), data.get('gyroZ'), rotation_magnitude,
-            # Converted gyroscope data (deg/s)
-            data.get('gyroX_dps'), data.get('gyroY_dps'), data.get('gyroZ_dps'), rotation_magnitude_dps,
-            # Shock & Vibration magnitude dari ESP32
-            data.get('shock_magnitude'),      # m/s² (dari accelerometer)
-            data.get('vibration_magnitude'),  # deg/s (dari gyroscope)
-            # GPS data
-            data.get('latitude'), data.get('longitude'), data.get('speed'), data.get('satellites')
-        )
+#         insert_data = (
+#             datetime.now(),
+#             # Ultrasonic data
+#             data.get('sensor1'), data.get('sensor2'), data.get('sensor3'), data.get('sensor4'),
+#             data.get('sensor5'), data.get('sensor6'), data.get('sensor7'), data.get('sensor8'),
+#             # Raw accelerometer data
+#             data.get('accelX'), data.get('accelY'), data.get('accelZ'), accel_magnitude,
+#             # Converted accelerometer data (m/s²)
+#             data.get('accelX_ms2'), data.get('accelY_ms2'), data.get('accelZ_ms2'), accel_magnitude_ms2,
+#             # Raw gyroscope data  
+#             data.get('gyroX'), data.get('gyroY'), data.get('gyroZ'), rotation_magnitude,
+#             # Converted gyroscope data (deg/s)
+#             data.get('gyroX_dps'), data.get('gyroY_dps'), data.get('gyroZ_dps'), rotation_magnitude_dps,
+#             # Shock & Vibration magnitude dari ESP32
+#             data.get('shock_magnitude'),      # m/s² (dari accelerometer)
+#             data.get('vibration_magnitude'),  # deg/s (dari gyroscope)
+#             # GPS data
+#             data.get('latitude'), data.get('longitude'), data.get('speed'), data.get('satellites')
+#         )
         
-        cursor.execute(insert_query, insert_data)
-        connection.commit()
+#         cursor.execute(insert_query, insert_data)
+#         connection.commit()
         
-        shock_val = data.get('shock_magnitude', 0)
-        vibration_val = data.get('vibration_magnitude', 0)
-        print(f"✅ Raw sensor data saved to MySQL (ID: {cursor.lastrowid})")
-        print(f"📊 Shock: {shock_val:.2f} m/s², Vibration: {vibration_val:.2f} deg/s")
-        return True
+#         shock_val = data.get('shock_magnitude', 0)
+#         vibration_val = data.get('vibration_magnitude', 0)
+#         print(f"✅ Raw sensor data saved to MySQL (ID: {cursor.lastrowid})")
+#         print(f"📊 Shock: {shock_val:.2f} m/s², Vibration: {vibration_val:.2f} deg/s")
+#         return True
         
-    except Error as e:
-        print(f"❌ Error saving sensor data: {e}")
-        return False
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+#     except Error as e:
+#         print(f"❌ Error saving sensor data: {e}")
+#         return False
+#     finally:
+#         if connection.is_connected():
+#             cursor.close()
+#             connection.close()
 
 def save_analysis_to_database(analysis_data, image_path=None, image_filename=None):
     """Menyimpan hasil analisis ke database"""

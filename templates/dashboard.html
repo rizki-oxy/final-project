@@ -117,13 +117,7 @@
         <p class="mb-0">Akses dan Download Data Monitoring Jalan</p>
       </div>
 
-      <!-- Table Selector -->
-      <div class="table-selector">
-        <h4 class="mb-3">Pilih Tabel Database</h4>
-        <div class="row" id="table-selector">
-          <!-- Table cards will be loaded here -->
-        </div>
-      </div>
+      
 
       <!-- Filters -->
       <div class="filters-section" id="filters-section" style="display: none">
@@ -213,60 +207,17 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-      let currentTable = null;
+      let currentTable = "road_damage_analysis";
       let currentPage = 1;
       let currentFilters = {};
 
-      // Load tables on page load
       document.addEventListener("DOMContentLoaded", function () {
-        loadAvailableTables();
+        document.getElementById("filters-section").style.display = "block";
+        loadTableData();
       });
 
-      async function loadAvailableTables() {
-        try {
-          const response = await fetch("/dashboard/api/tables");
-          const data = await response.json();
 
-          const container = document.getElementById("table-selector");
-          container.innerHTML = "";
-
-          data.tables.forEach((table) => {
-            const card = document.createElement("div");
-            card.className = "col-md-6";
-            card.innerHTML = `
-                        <div class="table-card" onclick="selectTable('${table.name}')">
-                            <div class="d-flex align-items-center mb-2">
-                                <span class="fs-2 me-3">${table.icon}</span>
-                                <div>
-                                    <h5 class="mb-1">${table.display_name}</h5>
-                                    <small class="text-muted">${table.description}</small>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-            container.appendChild(card);
-          });
-        } catch (error) {
-          console.error("Error loading tables:", error);
-        }
-      }
-
-      function selectTable(tableName) {
-        currentTable = tableName;
-        currentPage = 1;
-
-        // Update UI
-        document.querySelectorAll(".table-card").forEach((card) => {
-          card.classList.remove("active");
-        });
-        event.target.closest(".table-card").classList.add("active");
-
-        // Show filters
-        document.getElementById("filters-section").style.display = "block";
-
-        // Load data
-        loadTableData();
-      }
+      
 
       async function loadTableData() {
         if (!currentTable) return;
@@ -293,7 +244,7 @@
           currentFilters = { dateFrom, dateTo, search };
 
           const response = await fetch(
-            `/dashboard/api/data/${currentTable}?${params}`
+            `/dashboard/api/data/?${params}`
           );
           const data = await response.json();
 
@@ -442,7 +393,7 @@
           });
 
           // Create download link
-          const downloadUrl = `/dashboard/api/download/${currentTable}?${params}`;
+          const downloadUrl = `/dashboard/api/download/?${params}`;
 
           // Show loading
           const btn = event.target;

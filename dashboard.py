@@ -28,33 +28,33 @@ def dashboard_home():
     """Dashboard utama"""
     return render_template('dashboard.html')
 
-@dashboard_bp.route('/api/tables')
-def get_tables():
-    """Get available tables"""
-    return jsonify({
-        'tables': [
-            {
-                'name': 'road_damage_analysis',
-                'display_name': 'Analisis Kerusakan Jalan',
-                'description': 'Data hasil analisis kerusakan jalan (30 detik)',
-                'icon': ''
-            },
-            {
-                'name': 'sensor_data', 
-                'display_name': 'Data Sensor Mentah',
-                'description': 'Data sensor real-time (GPS, Ultrasonic, IMU)',
-                'icon': ''
-            }
-        ]
-    })
+# @dashboard_bp.route('/api/tables')
+# def get_tables():
+#     """Get available tables"""
+#     return jsonify({
+#         'tables': [
+#             {
+#                 'name': 'road_damage_analysis',
+#                 'display_name': 'Analisis Kerusakan Jalan',
+#                 'description': 'Data hasil analisis kerusakan jalan (30 detik)',
+#                 'icon': ''
+#             },
+#             {
+#                 'name': 'sensor_data', 
+#                 'display_name': 'Data Sensor Mentah',
+#                 'description': 'Data sensor real-time (GPS, Ultrasonic, IMU)',
+#                 'icon': ''
+#             }
+#         ]
+#     })
 
-@dashboard_bp.route('/api/data/<table_name>')
-def get_table_data(table_name):
+@dashboard_bp.route('/api/data/')
+def get_table_data():
     """Get data from specific table dengan filter"""
     
     # Validasi table name
-    if table_name not in ['road_damage_analysis', 'sensor_data']:
-        return jsonify({'error': 'Invalid table name'}), 400
+    # if table_name not in ['road_damage_analysis', 'sensor_data']:
+    #     return jsonify({'error': 'Invalid table name'}), 400
     
     # Get parameters
     page = request.args.get('page', 1, type=int)
@@ -71,27 +71,27 @@ def get_table_data(table_name):
         cursor = connection.cursor(dictionary=True)
         
         # Build query berdasarkan table
-        if table_name == 'road_damage_analysis':
-            base_query = """
+        # if table_name == 'road_damage_analysis':
+        base_query = """
                 SELECT id, analysis_timestamp, damage_classification, damage_length,
                        surface_change_max, shock_max, vibration_max,
                        start_latitude, start_longitude, end_latitude, end_longitude
                 FROM road_damage_analysis
             """
-            count_query = "SELECT COUNT(*) as total FROM road_damage_analysis"
-            timestamp_col = 'analysis_timestamp'
-            search_cols = ['damage_classification']
+        count_query = "SELECT COUNT(*) as total FROM road_damage_analysis"
+        timestamp_col = 'analysis_timestamp'
+        search_cols = ['damage_classification']
             
-        else:  # sensor_data
-            base_query = """
-                SELECT id, timestamp, latitude, longitude, speed, satellites,
-                       sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
-                       accel_magnitude_ms2, rotation_magnitude_dps, shock_magnitude, vibration_magnitude
-                FROM sensor_data
-            """
-            count_query = "SELECT COUNT(*) as total FROM sensor_data"
-            timestamp_col = 'timestamp'
-            search_cols = ['latitude', 'longitude']
+        # else:  # sensor_data
+            # base_query = """
+            #     SELECT id, timestamp, latitude, longitude, speed, satellites,
+            #            sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
+            #            accel_magnitude_ms2, rotation_magnitude_dps, shock_magnitude, vibration_magnitude
+            #     FROM sensor_data
+            # """
+            # count_query = "SELECT COUNT(*) as total FROM sensor_data"
+            # timestamp_col = 'timestamp'
+            # search_cols = ['latitude', 'longitude']
         
         # Build WHERE clause
         where_conditions = []
@@ -134,12 +134,8 @@ def get_table_data(table_name):
         
         # Format timestamps
         for row in data:
-            if table_name == 'road_damage_analysis':
-                if row['analysis_timestamp']:
-                    row['analysis_timestamp'] = row['analysis_timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                if row['timestamp']:
-                    row['timestamp'] = row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+            if row['analysis_timestamp']:
+                row['analysis_timestamp'] = row['analysis_timestamp'].strftime('%Y-%m-%d %H:%M:%S')
         
         return jsonify({
             'data': data,
@@ -158,12 +154,12 @@ def get_table_data(table_name):
             cursor.close()
             connection.close()
 
-@dashboard_bp.route('/api/download/<table_name>')
-def download_csv(table_name):
+@dashboard_bp.route('/api/download/')
+def download_csv():
     """Download data as CSV file"""
     
-    if table_name not in ['road_damage_analysis', 'sensor_data']:
-        return jsonify({'error': 'Invalid table name'}), 400
+    # if table_name not in ['road_damage_analysis', 'sensor_data']:
+    #     return jsonify({'error': 'Invalid table name'}), 400
     
     # Get filter parameters
     search = request.args.get('search', '')
@@ -178,30 +174,16 @@ def download_csv(table_name):
         cursor = connection.cursor(dictionary=True)
         
         # Build query untuk download (sama seperti sebelumnya)
-        if table_name == 'road_damage_analysis':
-            base_query = """
-                SELECT id, analysis_timestamp, damage_classification, damage_length,
-                       surface_change_max, surface_change_avg, surface_change_count,
-                       shock_max, shock_avg, shock_count,
-                       vibration_max, vibration_avg, vibration_count,
-                       start_latitude, start_longitude, end_latitude, end_longitude
-                FROM road_damage_analysis
-            """
-            timestamp_col = 'analysis_timestamp'
-            search_cols = ['damage_classification']
-            
-        else:  # sensor_data
-            base_query = """
-                SELECT id, timestamp, latitude, longitude, speed, satellites,
-                       sensor1_distance, sensor2_distance, sensor3_distance, sensor4_distance,
-                       sensor5_distance, sensor6_distance, sensor7_distance, sensor8_distance,
-                       accel_x_ms2, accel_y_ms2, accel_z_ms2, accel_magnitude_ms2,
-                       gyro_x_dps, gyro_y_dps, gyro_z_dps, rotation_magnitude_dps,
-                       shock_magnitude, vibration_magnitude
-                FROM sensor_data
-            """
-            timestamp_col = 'timestamp'
-            search_cols = ['latitude', 'longitude']
+        base_query = """
+            SELECT id, analysis_timestamp, damage_classification, damage_length,
+                surface_change_max, surface_change_avg, surface_change_count,
+                shock_max, shock_avg, shock_count,
+                vibration_max, vibration_avg, vibration_count,
+                start_latitude, start_longitude, end_latitude, end_longitude
+            FROM road_damage_analysis
+        """
+        timestamp_col = 'analysis_timestamp'
+        search_cols = ['damage_classification']
         
         # Build WHERE clause
         where_conditions = []
@@ -264,7 +246,7 @@ def download_csv(table_name):
         
         # Generate filename
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"road_monitoring_{table_name}_{timestamp}.csv"
+        filename = f"road_damage_analysis_{timestamp}.csv"
         
         # Create response
         response = make_response(output.getvalue())

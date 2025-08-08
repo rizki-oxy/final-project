@@ -259,6 +259,7 @@ def calculate_damage_length(data_points, has_damage=False):
 
 def perform_30s_analysis():
     """Melakukan analisis komprehensif setiap 30 detik dengan 3 parameter - SKIP 30 detik pertama"""
+    global last_analysis_time
     import analysis.buffer as buffer
     
     current_time = time.time()

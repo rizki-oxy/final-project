@@ -6,7 +6,7 @@ from thresholds import MIN_DATA_POINTS
 
 from analysis.buffer import data_buffer
 from analysis.analyzer import perform_30s_analysis
-from analysis.saver import save_sensor_data
+# from analysis.saver import save_sensor_data
 from filters.shock_filter import process_realtime_shock
 from filters.vibration_filter import process_realtime_vibration
 from core.thingsboard import send_to_thingsboard
@@ -66,7 +66,7 @@ def multisensor():
     print(f"📩 Data diterima: {datetime.now().strftime('%H:%M:%S')} (Post warming up)")
     
     # Simpan data mentah ke database (HANYA SETELAH WARMING UP)
-    save_sensor_data(data)
+    # save_sensor_data(data)
     
     # Tambahkan ke buffer untuk analisis (HANYA SETELAH WARMING UP)
     data_buffer.add_data(data)
