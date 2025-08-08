@@ -42,7 +42,7 @@ if __name__ == '__main__':
     print("=" * 60)
 
     # Test koneksi database
-    test_database_connection
+    test_database_connection()
 
     # Test koneksi ThingsBoard
     test_thingsboard_conn()
