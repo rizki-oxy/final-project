@@ -1,6 +1,8 @@
 import threading
 from datetime import datetime, timedelta
 
+from thresholds import ANALYSIS_INTERVAL
+
 # Data storage untuk analisis 30 detik
 class DataBuffer:
     def __init__(self, max_duration=30):
@@ -27,14 +29,14 @@ class DataBuffer:
             return len(self.data_points)
 
 # Global buffer instance
-data_buffer = None
+# data_buffer = None
 
-def init_buffer(duration):
-    global data_buffer
-    data_buffer = DataBuffer(duration)
+# def init_buffer(duration):
+#     global data_buffer
+#     data_buffer = DataBuffer(duration)
     
 # Global data buffer
-# data_buffer = DataBuffer(ANALYSIS_INTERVAL)
+data_buffer = DataBuffer(ANALYSIS_INTERVAL)
 last_analysis_time = 0
 first_data_received_time = None  # Waktu pertama data diterima dari ESP32
 INITIAL_SKIP_PERIOD = 30  # Skip 30 detik pertama setelah data pertama

@@ -14,8 +14,8 @@ from core.thingsboard import (
 from thresholds import (
     ANALYSIS_INTERVAL
 )
-from analysis.buffer import init_buffer, INITIAL_SKIP_PERIOD
-init_buffer(ANALYSIS_INTERVAL)
+from analysis.buffer import INITIAL_SKIP_PERIOD
+# init_buffer(ANALYSIS_INTERVAL)
 from dashboard import dashboard_bp
 from routes.multisensor import multisensor_bp
 from routes.status import status_bp
