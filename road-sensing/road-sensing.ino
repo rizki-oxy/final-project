@@ -78,8 +78,8 @@ bool accelCalibrated = false;
 const int CALIBRATION_SAMPLES = 100;
 
 // Threshold untuk dead zone (hapus noise kecil)
-const float GYRO_DEAD_ZONE = 1.0;  // deg/s - di bawah ini dianggap 0
-const float ACCEL_DEAD_ZONE = 1.0;
+const float GYRO_DEAD_ZONE = 0.5;  // deg/s - di bawah ini dianggap 0
+const float ACCEL_DEAD_ZONE = 0.5;
 // ========== END TAMBAHAN BARU ==========
 
 // VARIABEL BARU UNTUK DETEKSI SHOCK & VIBRATION

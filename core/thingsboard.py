@@ -10,12 +10,12 @@ from core.config import UPLOAD_FOLDER, THINGSBOARD_IMAGE_CONFIG, THINGSBOARD_CON
 def test_thingsboard_conn():
     # Test ThingsBoard connection
     test_payload = {
-        "startup_test": "Flask server starting with 3 parameters",
+        # "startup_test": "Flask server starting",
         "startup_timestamp": datetime.now().isoformat(),
-        "parameters": "surface + shock + vibration",
-        "shock_unit": "m/s² (filtered)",
-        "vibration_unit": "deg/s (filtered)",
-        "filters": "shock & vibration filters enabled"
+        # "parameters": "surface + shock + vibration",
+        # "shock_unit": "m/s² (filtered)",
+        # "vibration_unit": "deg/s (filtered)",
+        # "filters": "shock & vibration filters enabled"
     }
     
     if send_to_thingsboard(test_payload, "startup_test"):
@@ -33,8 +33,8 @@ def send_to_thingsboard(payload_data, data_type="analysis"):
             prefixed_payload[f"fls_{key}"] = value
         
         # Add metadata
-        prefixed_payload["fls_data_source"] = "flask_server"
-        prefixed_payload["fls_data_type"] = data_type
+        # prefixed_payload["fls_data_source"] = "flask_server"
+        # prefixed_payload["fls_data_type"] = data_type
         prefixed_payload["fls_timestamp"] = datetime.now().isoformat()
         
         headers = {
@@ -219,12 +219,12 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
             "shock_max_ms2": float(result['shock_max']) if result['shock_max'] else 0,
             "vibration_max_dps": float(result['vibration_max']) if result['vibration_max'] else 0,
             "speed_min_kmh": float(result['speed_min']) if result['speed_min'] else None,
-    "speed_max_kmh": float(result['speed_max']) if result['speed_max'] else None,
-    "speed_avg_kmh": float(result['speed_avg']) if result['speed_avg'] else None,
-    "speed_range": result['speed_range'] if result['speed_range'] else "No GPS data",
-    "speed_data_points": int(result['speed_data_count']) if result['speed_data_count'] else 0,
-            "damage_detected": True,
-            "compression_strategy": "file_to_thingsboard_only"
+            "speed_max_kmh": float(result['speed_max']) if result['speed_max'] else None,
+            "speed_avg_kmh": float(result['speed_avg']) if result['speed_avg'] else None,
+            "speed_range": result['speed_range'] if result['speed_range'] else "No GPS data",
+            "speed_data_points": int(result['speed_data_count']) if result['speed_data_count'] else 0,
+            # "damage_detected": True,
+            # "compression_strategy": "file_to_thingsboard_only"
         }
         
         # Add location if available
@@ -249,10 +249,10 @@ def send_analysis_with_optimized_image_to_thingsboard(analysis_id):
                     thingsboard_payload.update({
                         "analysis_image_base64": compressed_base64,
                         "has_image": True,
-                        "image_format": "JPEG_compressed_from_PNG",
-                        "image_size_bytes": base64_size,
-                        "database_has_original": True,
-                        "compression_applied": True
+                        # "image_format": "JPEG_compressed_from_PNG",
+                        # "image_size_bytes": base64_size,
+                        # "database_has_original": True,
+                        # "compression_applied": True
                     })
                     image_success = True
                     print(f"✅ Compressed image sent to ThingsBoard: {base64_size} bytes")

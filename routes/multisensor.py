@@ -79,20 +79,20 @@ def multisensor():
     realtime_payload = {}
     
     if shock_result and shock_result['is_road_shock']:
-        realtime_payload["fls_realtime_shock_ms2"] = shock_result['filtered_shock']
+        realtime_payload["realtime_shock_ms2"] = shock_result['filtered_shock']
         print(f"📡 Shock real-time: {shock_result['filtered_shock']:.2f} m/s²")
     
     if vibration_result and vibration_result['is_road_vibration']:
-        realtime_payload["fls_realtime_vibration_dps"] = vibration_result['filtered_vibration']
+        realtime_payload["realtime_vibration_dps"] = vibration_result['filtered_vibration']
         print(f"📡 Vibration real-time: {vibration_result['filtered_vibration']:.2f} deg/s")
     
     if realtime_payload:
         realtime_payload.update({
-            "fls_timestamp": datetime.now().isoformat(),
-            "fls_data_type": "realtime_3param",
-            "fls_shock_filter_enabled": True,
-            "fls_vibration_filter_enabled": True,
-            "fls_post_warming_up": True
+            "timestamp": datetime.now().isoformat(),
+            # "fls_data_type": "realtime_3param",
+            # "fls_shock_filter_enabled": True,
+            # "fls_vibration_filter_enabled": True,
+            # "fls_post_warming_up": True
         })
         send_to_thingsboard(realtime_payload, "realtime_3param")
     
