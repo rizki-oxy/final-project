@@ -72,11 +72,14 @@ float rotationMagnitude_dps = 0;              // magnitude dalam deg/s
 // ========== TAMBAHAN BARU: KALIBRASI GYROSCOPE ==========
 // Offset kalibrasi gyroscope (diisi saat startup)
 float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
+float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
 bool gyroCalibrated = false;
+bool accelCalibrated = false;
 const int CALIBRATION_SAMPLES = 100;
 
 // Threshold untuk dead zone (hapus noise kecil)
-const float GYRO_DEAD_ZONE = 2.0;  // deg/s - di bawah ini dianggap 0
+const float GYRO_DEAD_ZONE = 1.0;  // deg/s - di bawah ini dianggap 0
+const float ACCEL_DEAD_ZONE = 1.0;
 // ========== END TAMBAHAN BARU ==========
 
 // VARIABEL BARU UNTUK DETEKSI SHOCK & VIBRATION
@@ -156,13 +159,24 @@ void setup() {
     Wire.write(PWR_MGMT_1);
     Wire.write(0);
     Wire.endTransmission(true);
+
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x1C);
+    Wire.write(0x18);
+    Wire.endTransmission(true);
+
     Serial.println("✅ GY-521 sensor initialized!");
     Serial.println("📊 Conversion: ±16g range, ±250°/s range");
     Serial.println("📊 Output: Raw LSB + m/s² + deg/s");
     Serial.println("📳 Shock detection: Accelerometer spikes");
     Serial.println("🔄 Vibration detection: Gyroscope oscillations");
     
-    // ========== TAMBAHAN BARU: KALIBRASI GYROSCOPE ==========
+    // ========== TAMBAHAN BARU: KALIBRASI  ==========
+    Serial.println("🔧 Kalibrasi akselerometer...");
+    calibrateAccelerometer();
+    Serial.println("✅ Kalibrasi akselerometer selesai!");
+
+
     Serial.println("🔧 Kalibrasi gyroscope...");
     calibrateGyroscope();
     Serial.println("✅ Kalibrasi gyroscope selesai!");
@@ -241,6 +255,63 @@ void resetGyroCalibration() {
   Serial.println("🔄 Reset kalibrasi gyroscope...");
   delay(1000);
   calibrateGyroscope();
+}
+
+void calibrateAccelerometer() {
+  /*Kalibrasi offset gyroscope dengan 100 sample saat diam*/
+  float sumX = 0, sumY = 0, sumZ = 0;
+  
+  Serial.println("⏳ Jangan gerakkan alat selama kalibrasi accel (10 detik)...");
+  Serial.print("Progress: ");
+  
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+    // Baca raw data
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(ACCEL_XOUT_H);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU6050_ADDR, 6, true);
+    
+    int16_t rawX = Wire.read() << 8 | Wire.read();
+    int16_t rawY = Wire.read() << 8 | Wire.read();
+    int16_t rawZ = Wire.read() << 8 | Wire.read();
+    
+    // Konversi ke deg/s
+    sumX += (float)rawX / ACCEL_SCALE_16G;
+    sumY += (float)rawY / ACCEL_SCALE_16G;
+    sumZ += (float)rawZ / ACCEL_SCALE_16G;
+    
+    delay(100);  // 100ms per sample
+    
+    if (i % 20 == 0) {
+      Serial.print(".");
+    }
+  }
+  
+  // Hitung offset rata-rata
+  accelOffsetX = sumX / CALIBRATION_SAMPLES;
+  accelOffsetY = sumY / CALIBRATION_SAMPLES;
+  accelOffsetZ = sumZ / CALIBRATION_SAMPLES - 1.0;
+  
+  accelCalibrated = true;
+  
+  Serial.println();
+  Serial.print("📊 Accel Offset - X: ");
+  Serial.print(accelOffsetX, 3);
+  Serial.print(", Y: ");
+  Serial.print(accelOffsetY, 3);
+  Serial.print(", Z: ");
+  Serial.println(accelOffsetZ, 3);
+}
+
+// FUNGSI TAMBAHAN: Reset kalibrasi jika diperlukan
+void resetAccelCalibration() {
+  /*Reset dan kalibrasi ulang accel*/
+  accelCalibrated = false;
+  accelOffsetX = accelOffsetY = accelOffsetZ = 0;
+  
+  Serial.println("🔄 Reset kalibrasi accel...");
+  delay(1000);
+  calibrateAccelerometer();
 }
 // ========== END TAMBAHAN BARU ==========
 
@@ -372,13 +443,13 @@ void readSensorData() {
 
 void convertSensorData() {
   // Konversi Accelerometer: LSB → g → m/s²
-  accelX_g = (float)accelX / ACCEL_SCALE_16G;
-  accelY_g = (float)accelY / ACCEL_SCALE_16G;
-  accelZ_g = (float)accelZ / ACCEL_SCALE_16G;
+  accelX_g = (float)accelX / ACCEL_SCALE_16G - accelOffsetX;
+  accelY_g = (float)accelY / ACCEL_SCALE_16G - accelOffsetY;
+  accelZ_g = (float)accelZ / ACCEL_SCALE_16G - accelOffsetZ;
   
-  accelX_ms2 = accelX_g * GRAVITY_MS2;
-  accelY_ms2 = accelY_g * GRAVITY_MS2;
-  accelZ_ms2 = accelZ_g * GRAVITY_MS2;
+  accelX_ms2 = accelX_g * GRAVITY_MS2 - accelOffsetX;
+  accelY_ms2 = accelY_g * GRAVITY_MS2 - accelOffsetY;
+  accelZ_ms2 = accelZ_g * GRAVITY_MS2 - accelOffsetZ;
   
   // Hitung magnitudo accelerometer
   accelMagnitude_g = sqrt(accelX_g * accelX_g + accelY_g * accelY_g + accelZ_g * accelZ_g);
@@ -433,6 +504,8 @@ void calculateShockMagnitude() {
   }
   
   shockMagnitude_ms2 = sum / count;
+
+  if (abs(shockMagnitude_ms2) < ACCEL_DEAD_ZONE) shockMagnitude_ms2 = 0;
   
   // Update previous magnitude
   prevAccelMagnitude_ms2 = accelMagnitude_ms2;
@@ -636,11 +709,11 @@ String createThingsBoardPayload() {
     payload += "\"gyro_z_dps\":" + String(gyroZ_dps, 2) + ",";
     
     // ========== TAMBAHAN BARU: INFO KALIBRASI ==========
-    payload += "\"gyro_calibrated\":" + String(gyroCalibrated ? "true" : "false") + ",";
-    payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
-    payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
-    payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
-    payload += "\"gyro_dead_zone\":" + String(GYRO_DEAD_ZONE, 1) + ",";
+
+    // payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
+    // payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
+    // payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
+
     // ========== END TAMBAHAN BARU ==========
   }
   
@@ -694,10 +767,10 @@ String createFlaskPayload() {
     payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_dps, 2) + ",";
     
     // ========== TAMBAHAN BARU: INFO KALIBRASI UNTUK FLASK ==========
-    payload += "\"gyro_calibrated\":" + String(gyroCalibrated ? "true" : "false") + ",";
-    payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
-    payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
-    payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
+    // payload += "\"gyro_calibrated\":" + String(gyroCalibrated ? "true" : "false") + ",";
+    // payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
+    // payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
+    // payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
     // ========== END TAMBAHAN BARU ==========
   }
   
@@ -785,24 +858,24 @@ void printCommunicationStats() {
     Serial.print(rotationMagnitude_dps);
     Serial.println(" deg/s");
     
-    // ========== TAMBAHAN BARU: STATUS KALIBRASI ==========
-    Serial.println("🔧 === GYROSCOPE CALIBRATION STATUS ===");
-    Serial.print("Calibrated: ");
-    Serial.println(gyroCalibrated ? "✅ YES" : "❌ NO");
-    if (gyroCalibrated) {
-      Serial.print("Offset X: ");
-      Serial.print(gyroOffsetX, 3);
-      Serial.println(" deg/s");
-      Serial.print("Offset Y: ");
-      Serial.print(gyroOffsetY, 3);
-      Serial.println(" deg/s");
-      Serial.print("Offset Z: ");
-      Serial.print(gyroOffsetZ, 3);
-      Serial.println(" deg/s");
-      Serial.print("Dead Zone: ±");
-      Serial.print(GYRO_DEAD_ZONE, 1);
-      Serial.println(" deg/s");
-    }
+    // // ========== TAMBAHAN BARU: STATUS KALIBRASI ==========
+    // Serial.println("🔧 === GYROSCOPE CALIBRATION STATUS ===");
+    // Serial.print("Calibrated: ");
+    // Serial.println(gyroCalibrated ? "✅ YES" : "❌ NO");
+    // if (gyroCalibrated) {
+    //   Serial.print("Offset X: ");
+    //   Serial.print(gyroOffsetX, 3);
+    //   Serial.println(" deg/s");
+    //   Serial.print("Offset Y: ");
+    //   Serial.print(gyroOffsetY, 3);
+    //   Serial.println(" deg/s");
+    //   Serial.print("Offset Z: ");
+    //   Serial.print(gyroOffsetZ, 3);
+    //   Serial.println(" deg/s");
+    //   Serial.print("Dead Zone: ±");
+    //   Serial.print(GYRO_DEAD_ZONE, 1);
+    //   Serial.println(" deg/s");
+    // }
     // ========== END TAMBAHAN BARU ==========
   }
   Serial.println("=====================================\n");
