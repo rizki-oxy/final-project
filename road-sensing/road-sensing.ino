@@ -629,14 +629,6 @@ String createThingsBoardPayload() {
     payload += "\"gyro_x_dps\":" + String(gyroX_dps, 2) + ",";
     payload += "\"gyro_y_dps\":" + String(gyroY_dps, 2) + ",";
     payload += "\"gyro_z_dps\":" + String(gyroZ_dps, 2) + ",";
-    
-    // ========== TAMBAHAN BARU: INFO KALIBRASI ==========
-    payload += "\"gyro_calibrated\":" + String(gyroCalibrated ? "true" : "false") + ",";
-    payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
-    payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
-    payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
-    payload += "\"gyro_dead_zone\":" + String(GYRO_DEAD_ZONE, 1) + ",";
-    // ========== END TAMBAHAN BARU ==========
   }
   
   // Ultrasonic Data
