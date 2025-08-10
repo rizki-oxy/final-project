@@ -162,7 +162,7 @@ def create_analysis_visualization(analysis_data):
     
     ax4.text(0.05, 0.95, info_text, ha='left', va='top', transform=ax4.transAxes, 
             fontsize=9, bbox=dict(boxstyle="round,pad=0.5", facecolor=bg_color, alpha=0.8))
-    ax4.set_title('Info Kerusakan (3 Parameter)')
+    ax4.set_title('Info Kerusakan')
     ax4.axis('off')
     
     plt.tight_layout()
