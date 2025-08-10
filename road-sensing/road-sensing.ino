@@ -32,7 +32,7 @@ unsigned long httpFailCount = 0;
 // Conversion constants untuk MPU6050
 const float ACCEL_SCALE_16G = 2048.0;    // LSB/g untuk ±16g range
 const float GYRO_SCALE_250DPS = 131.0;   // LSB/(deg/s) untuk ±250 deg/s range
-const float GRAVITY_MS2 = 9.81;          // m/s² conversion factor
+const float GRAVITY_MS2 = 9.81;          // m/s² 
 
 // ESP32 I2C Pins
 #define SDA_PIN 21
@@ -69,22 +69,22 @@ float accelMagnitude_ms2 = 0;                 // magnitude dalam m/s²
 float gyroX_dps, gyroY_dps, gyroZ_dps;        // dalam deg/s
 float rotationMagnitude_dps = 0;              // magnitude dalam deg/s
 
-// ========== TAMBAHAN BARU: KALIBRASI GYROSCOPE ==========
+// ========== KALIBRASI GYROSCOPE ==========
 // Offset kalibrasi gyroscope (diisi saat startup)
 float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
 bool gyroCalibrated = false;
 const int CALIBRATION_SAMPLES = 100;
 
-// Threshold untuk dead zone (hapus noise kecil)
-const float GYRO_DEAD_ZONE = 1.0;  // deg/s - di bawah ini dianggap 0
-// ========== END TAMBAHAN BARU ==========
 
-// VARIABEL BARU UNTUK DETEKSI SHOCK & VIBRATION
+const float GYRO_DEAD_ZONE = 1.0;
+
+
+// VARIABEL UNTUK DETEKSI SHOCK & VIBRATION
 float prevAccelMagnitude_ms2 = 0;
 float shockMagnitude_ms2 = 0;                 // SHOCK dari accelerometer
 float vibrationMagnitude_dps = 0;             // VIBRATION dari gyroscope
-float shockThreshold_ms2 = 25.0;              // threshold shock dalam m/s²
-float vibrationThreshold_dps = 100.0;         // threshold vibration dalam deg/s
+float shockThreshold_ms2 = 25.0;              
+float vibrationThreshold_dps = 100.0;         
 
 // Buffer untuk smoothing shock (moving average)
 const int SHOCK_BUFFER_SIZE = 5;
@@ -162,11 +162,10 @@ void setup() {
     Serial.println("📳 Shock detection: Accelerometer spikes");
     Serial.println("🔄 Vibration detection: Gyroscope oscillations");
     
-    // ========== TAMBAHAN BARU: KALIBRASI GYROSCOPE ==========
+    // ========== KALIBRASI GYROSCOPE ==========
     Serial.println("🔧 Kalibrasi gyroscope...");
     calibrateGyroscope();
     Serial.println("✅ Kalibrasi gyroscope selesai!");
-    // ========== END TAMBAHAN BARU ==========
   }
   
   // Initialize Ultrasonic sensors
@@ -185,7 +184,7 @@ void setup() {
   Serial.println();
 }
 
-// ========== TAMBAHAN BARU: FUNGSI KALIBRASI ==========
+// ========== FUNGSI KALIBRASI ==========
 void calibrateGyroscope() {
   /*Kalibrasi offset gyroscope dengan 100 sample saat diam*/
   float sumX = 0, sumY = 0, sumZ = 0;
@@ -232,7 +231,7 @@ void calibrateGyroscope() {
   Serial.println(gyroOffsetZ, 3);
 }
 
-// FUNGSI TAMBAHAN: Reset kalibrasi jika diperlukan
+// Reset kalibrasi jika diperlukan
 void resetGyroCalibration() {
   /*Reset dan kalibrasi ulang gyroscope*/
   gyroCalibrated = false;
@@ -242,7 +241,6 @@ void resetGyroCalibration() {
   delay(1000);
   calibrateGyroscope();
 }
-// ========== END TAMBAHAN BARU ==========
 
 void loop() {
   unsigned long currentTime = millis();
@@ -280,7 +278,6 @@ void loop() {
     sendAllSensorData();
     lastDataSendTime = currentTime;
   }
-  
   delay(10);
 }
 
@@ -329,8 +326,8 @@ void processSensorData() {
   
   readSensorData();
   convertSensorData();
-  calculateShockMagnitude();      // FUNGSI BARU UNTUK SHOCK
-  calculateVibrationMagnitude();  // FUNGSI BARU UNTUK VIBRATION
+  calculateShockMagnitude();      
+  calculateVibrationMagnitude();  
   checkShock();
   checkVibration();
 }
@@ -384,7 +381,7 @@ void convertSensorData() {
   accelMagnitude_g = sqrt(accelX_g * accelX_g + accelY_g * accelY_g + accelZ_g * accelZ_g);
   accelMagnitude_ms2 = sqrt(accelX_ms2 * accelX_ms2 + accelY_ms2 * accelY_ms2 + accelZ_ms2 * accelZ_ms2);
   
-  // ========== MODIFIKASI: Konversi Gyroscope dengan KALIBRASI dan DEAD ZONE ==========
+  // ========== Konversi Gyroscope dengan KALIBRASI dan DEAD ZONE ==========
   // Konversi raw ke deg/s
   float rawGyroX_dps = (float)gyroX / GYRO_SCALE_250DPS;
   float rawGyroY_dps = (float)gyroY / GYRO_SCALE_250DPS;
@@ -408,10 +405,9 @@ void convertSensorData() {
   
   // Hitung magnitudo rotasi yang sudah dikalibrasi
   rotationMagnitude_dps = sqrt(gyroX_dps * gyroX_dps + gyroY_dps * gyroY_dps + gyroZ_dps * gyroZ_dps);
-  // ========== END MODIFIKASI ==========
 }
 
-// FUNGSI BARU: Hitung magnitude shock dari accelerometer
+// Hitung magnitude shock dari accelerometer
 void calculateShockMagnitude() {
   // Hitung perubahan accelerometer magnitude (shock detection)
   float rawShock = abs(accelMagnitude_ms2 - prevAccelMagnitude_ms2);
@@ -438,7 +434,7 @@ void calculateShockMagnitude() {
   prevAccelMagnitude_ms2 = accelMagnitude_ms2;
 }
 
-// ========== MODIFIKASI: FUNGSI VIBRATION MENGGUNAKAN DATA YANG SUDAH DIKALIBRASI ==========
+// ========== FUNGSI VIBRATION MENGGUNAKAN DATA YANG SUDAH DIKALIBRASI ==========
 void calculateVibrationMagnitude() {
   // Gunakan rotationMagnitude_dps yang sudah dikalibrasi dan di-dead zone
   float rawVibration = rotationMagnitude_dps;
@@ -461,7 +457,6 @@ void calculateVibrationMagnitude() {
   
   vibrationMagnitude_dps = sum / count;
 }
-// ========== END MODIFIKASI ==========
 
 void checkShock() {
   if (shockMagnitude_ms2 > shockThreshold_ms2) {
@@ -693,12 +688,6 @@ String createFlaskPayload() {
     payload += "\"shock_magnitude\":" + String(shockMagnitude_ms2, 2) + ",";
     payload += "\"vibration_magnitude\":" + String(vibrationMagnitude_dps, 2) + ",";
     
-    // ========== TAMBAHAN BARU: INFO KALIBRASI UNTUK FLASK ==========
-    payload += "\"gyro_calibrated\":" + String(gyroCalibrated ? "true" : "false") + ",";
-    payload += "\"gyro_offset_x\":" + String(gyroOffsetX, 3) + ",";
-    payload += "\"gyro_offset_y\":" + String(gyroOffsetY, 3) + ",";
-    payload += "\"gyro_offset_z\":" + String(gyroOffsetZ, 3) + ",";
-    // ========== END TAMBAHAN BARU ==========
   }
   
   // Ultrasonic data untuk Flask
@@ -769,7 +758,7 @@ void printCommunicationStats() {
   
   // Print conversion info + SHOCK & VIBRATION INFO + KALIBRASI INFO
   if (sensorDetected) {
-    Serial.println("🔄 === GY-521 CONVERSION STATUS ===");
+    Serial.println("=== GY-521 CONVERSION STATUS ===");
     Serial.print("Accel Magnitude: ");
     Serial.print(accelMagnitude_ms2);
     Serial.println(" m/s²");
@@ -785,25 +774,6 @@ void printCommunicationStats() {
     Serial.print(rotationMagnitude_dps);
     Serial.println(" deg/s");
     
-    // ========== TAMBAHAN BARU: STATUS KALIBRASI ==========
-    Serial.println("🔧 === GYROSCOPE CALIBRATION STATUS ===");
-    Serial.print("Calibrated: ");
-    Serial.println(gyroCalibrated ? "✅ YES" : "❌ NO");
-    if (gyroCalibrated) {
-      Serial.print("Offset X: ");
-      Serial.print(gyroOffsetX, 3);
-      Serial.println(" deg/s");
-      Serial.print("Offset Y: ");
-      Serial.print(gyroOffsetY, 3);
-      Serial.println(" deg/s");
-      Serial.print("Offset Z: ");
-      Serial.print(gyroOffsetZ, 3);
-      Serial.println(" deg/s");
-      Serial.print("Dead Zone: ±");
-      Serial.print(GYRO_DEAD_ZONE, 1);
-      Serial.println(" deg/s");
-    }
-    // ========== END TAMBAHAN BARU ==========
   }
   Serial.println("=====================================\n");
 }
