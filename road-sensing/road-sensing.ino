@@ -10,7 +10,7 @@ const char* access_token = "0939gxC3IXo3uoCIgAED";
 
 // ThingsBoard HTTP Configuration
 const char* thingsboard_server = "192.168.43.18";
-const int thingsboard_port = 8081;
+const int thingsboard_port = 8081; 
 const String thingsboard_url = "http://" + String(thingsboard_server) + ":" + String(thingsboard_port) + "/api/v1/" + String(access_token) + "/telemetry";
 
 // Communication status tracking
@@ -110,6 +110,44 @@ float distances[8];
 // System Variables
 unsigned long lastDataSendTime = 0;
 const unsigned long dataSendInterval = 2000;
+
+struct SensorData {
+  // GPS Data
+  float latitude;
+  float longitude;
+  float speed;
+  int satellites;
+  
+  // Ultrasonic Data
+  float sensor1;
+  float sensor2;
+  float sensor3;
+  float sensor4;
+  float sensor5;
+  float sensor6;
+  float sensor7;
+  float sensor8;
+  
+  // Motion Data
+  float accelX_ms2;
+  float accelY_ms2;
+  float accelZ_ms2;
+  float accel_magnitude_ms2;
+  float gyroX_dps;
+  float gyroY_dps;
+  float gyroZ_dps;
+  float rotation_magnitude_dps;
+  float shock_magnitude;
+  float vibration_magnitude;
+  
+  unsigned long timestamp;
+};
+
+// Buffer untuk menyimpan data offline
+const int OFFLINE_BUFFER_SIZE = 60;
+SensorData offlineBuffer[OFFLINE_BUFFER_SIZE];
+int offlineBufferIndex = 0;
+bool offlineBufferFull = false;
 
 void setup() {
   Serial.begin(115200);
@@ -319,6 +357,15 @@ bool reconnect_wifi_if_needed() {
     }
   }
   return true;
+}
+
+bool checkInternetConnection() {
+  HTTPClient http;
+  http.begin("http://google.com");
+  int httpCode = http.GET();
+  http.end();
+  
+  return httpCode > 0;
 }
 
 void processSensorData() {
@@ -557,12 +604,188 @@ void readAllUltrasonicSensors() {
   }
 }
 
+void saveToOfflineBuffer(SensorData data) {
+  offlineBuffer[offlineBufferIndex] = data;
+  offlineBufferIndex = (offlineBufferIndex + 1) % OFFLINE_BUFFER_SIZE;
+  
+  if (offlineBufferIndex == 0) {
+    offlineBufferFull = true;
+  }
+  
+  Serial.println("📥 Data saved to offline buffer");
+  Serial.print("Buffer usage: ");
+  Serial.print(offlineBufferFull ? OFFLINE_BUFFER_SIZE : offlineBufferIndex);
+  Serial.print("/");
+  Serial.println(OFFLINE_BUFFER_SIZE);
+}
+
+void sendOfflineData() {
+  if (!checkInternetConnection()) {
+    Serial.println("❌ Still offline, keeping data in buffer");
+    return;
+  }
+
+  int dataCount = offlineBufferFull ? OFFLINE_BUFFER_SIZE : offlineBufferIndex;
+  
+  if (dataCount == 0) {
+    Serial.println("✅ No offline data to send");
+    return;
+  }
+
+  Serial.print("📤 Sending ");
+  Serial.print(dataCount);
+  Serial.println(" offline data points...");
+
+  // Prepare batch data
+  String batchPayload = "[";
+  for (int i = 0; i < dataCount; i++) {
+    SensorData data = offlineBuffer[i];
+    
+    String dataJson = "{";
+    dataJson += "\"timestamp\":" + String(data.timestamp) + ",";
+    
+    // GPS data
+    if (data.latitude != 0 && data.longitude != 0) {
+      dataJson += "\"latitude\":" + String(data.latitude, 6) + ",";
+      dataJson += "\"longitude\":" + String(data.longitude, 6) + ",";
+      dataJson += "\"speed\":" + String(data.speed) + ",";
+      dataJson += "\"satellites\":" + String(data.satellites) + ",";
+    }
+    
+    // Sensor data
+    dataJson += "\"sensor1\":" + String(data.sensor1) + ",";
+    dataJson += "\"sensor2\":" + String(data.sensor2) + ",";
+    dataJson += "\"sensor3\":" + String(data.sensor3) + ",";
+    dataJson += "\"sensor4\":" + String(data.sensor4) + ",";
+    dataJson += "\"sensor5\":" + String(data.sensor5) + ",";
+    dataJson += "\"sensor6\":" + String(data.sensor6) + ",";
+    dataJson += "\"sensor7\":" + String(data.sensor7) + ",";
+    dataJson += "\"sensor8\":" + String(data.sensor8) + ",";
+    
+    // Motion data
+    dataJson += "\"accelX_ms2\":" + String(data.accelX_ms2) + ",";
+    dataJson += "\"accelY_ms2\":" + String(data.accelY_ms2) + ",";
+    dataJson += "\"accelZ_ms2\":" + String(data.accelZ_ms2) + ",";
+    dataJson += "\"accel_magnitude_ms2\":" + String(data.accel_magnitude_ms2) + ",";
+    dataJson += "\"gyroX_dps\":" + String(data.gyroX_dps) + ",";
+    dataJson += "\"gyroY_dps\":" + String(data.gyroY_dps) + ",";
+    dataJson += "\"gyroZ_dps\":" + String(data.gyroZ_dps) + ",";
+    dataJson += "\"rotation_magnitude_dps\":" + String(data.rotation_magnitude_dps) + ",";
+    dataJson += "\"shock_magnitude\":" + String(data.shock_magnitude) + ",";
+    dataJson += "\"vibration_magnitude\":" + String(data.vibration_magnitude);
+    dataJson += "}";
+    
+    batchPayload += dataJson;
+    if (i < dataCount - 1) batchPayload += ",";
+  }
+  batchPayload += "]";
+
+  // Send to Flask
+  HTTPClient http;
+  http.begin("http://192.168.43.18:5000/offline-data");
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpResponseCode = http.POST(batchPayload);
+  
+  if (httpResponseCode == 200) {
+    Serial.println("✅ Offline data sent successfully");
+    // Reset buffer
+    offlineBufferIndex = 0;
+    offlineBufferFull = false;
+  } else {
+    Serial.print("❌ Error sending offline data: ");
+    Serial.println(httpResponseCode);
+  }
+  
+  http.end();
+}
+
 void sendAllSensorData() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("⚠️ WiFi not connected, skipping data send");
+    Serial.println("⚠️ WiFi not connected, saving to buffer");
+    
+    // Create sensor data struct
+    SensorData data;
+    data.timestamp = millis();
+    
+    // GPS data
+    if (gps.location.isValid()) {
+      data.latitude = gps.location.lat();
+      data.longitude = gps.location.lng();
+      data.speed = gps.speed.kmph();
+      data.satellites = gps.satellites.value();
+    }
+    
+    // Copy sensor readings
+    data.sensor1 = distances[0];
+    data.sensor2 = distances[1];
+    data.sensor3 = distances[2];
+    data.sensor4 = distances[3];
+    data.sensor5 = distances[4];
+    data.sensor6 = distances[5];
+    data.sensor7 = distances[6];
+    data.sensor8 = distances[7];
+    
+    // Motion data
+    data.accelX_ms2 = accelX_ms2;
+    data.accelY_ms2 = accelY_ms2;
+    data.accelZ_ms2 = accelZ_ms2;
+    data.accel_magnitude_ms2 = accelMagnitude_ms2;
+    data.gyroX_dps = gyroX_dps;
+    data.gyroY_dps = gyroY_dps;
+    data.gyroZ_dps = gyroZ_dps;
+    data.rotation_magnitude_dps = rotationMagnitude_dps;
+    data.shock_magnitude = shockMagnitude_ms2;
+    data.vibration_magnitude = vibrationMagnitude_dps;
+    
+    populateSensorData(&data);
+    saveToOfflineBuffer(data);
     return;
   }
   
+  if (!checkInternetConnection()) {
+    Serial.println("⚠️ No internet connection, saving to buffer");
+    
+    SensorData data;
+    data.timestamp = millis();
+
+    // GPS data
+    if (gps.location.isValid()) {
+      data.latitude = gps.location.lat();
+      data.longitude = gps.location.lng();
+      data.speed = gps.speed.kmph();
+      data.satellites = gps.satellites.value();
+    }
+    
+    // Copy sensor readings
+    data.sensor1 = distances[0];
+    data.sensor2 = distances[1];
+    data.sensor3 = distances[2];
+    data.sensor4 = distances[3];
+    data.sensor5 = distances[4];
+    data.sensor6 = distances[5];
+    data.sensor7 = distances[6];
+    data.sensor8 = distances[7];
+    
+    // Motion data
+    data.accelX_ms2 = accelX_ms2;
+    data.accelY_ms2 = accelY_ms2;
+    data.accelZ_ms2 = accelZ_ms2;
+    data.accel_magnitude_ms2 = accelMagnitude_ms2;
+    data.gyroX_dps = gyroX_dps;
+    data.gyroY_dps = gyroY_dps;
+    data.gyroZ_dps = gyroZ_dps;
+    data.rotation_magnitude_dps = rotationMagnitude_dps;
+    data.shock_magnitude = shockMagnitude_ms2;
+    data.vibration_magnitude = vibrationMagnitude_dps;
+
+    populateSensorData(&data);
+    saveToOfflineBuffer(data);
+    return;
+  }
+
+  sendOfflineData();
+
   // Create comprehensive JSON payload untuk ThingsBoard
   String tbPayload = createThingsBoardPayload();
   
@@ -592,6 +815,43 @@ void sendAllSensorData() {
   }
   
   Serial.println("=================================");
+}
+
+void populateSensorData(SensorData* data) {
+  // GPS data
+  if (gps.location.isValid()) {
+    data->latitude = gps.location.lat();
+    data->longitude = gps.location.lng();
+    data->speed = gps.speed.kmph();
+    data->satellites = gps.satellites.value();
+  } else {
+    data->latitude = 0;
+    data->longitude = 0;
+    data->speed = 0;
+    data->satellites = 0;
+  }
+  
+  // Copy sensor readings
+  data->sensor1 = distances[0];
+  data->sensor2 = distances[1];
+  data->sensor3 = distances[2];
+  data->sensor4 = distances[3];
+  data->sensor5 = distances[4];
+  data->sensor6 = distances[5];
+  data->sensor7 = distances[6];
+  data->sensor8 = distances[7];
+  
+  // Motion data
+  data->accelX_ms2 = accelX_ms2;
+  data->accelY_ms2 = accelY_ms2;
+  data->accelZ_ms2 = accelZ_ms2;
+  data->accel_magnitude_ms2 = accelMagnitude_ms2;
+  data->gyroX_dps = gyroX_dps;
+  data->gyroY_dps = gyroY_dps;
+  data->gyroZ_dps = gyroZ_dps;
+  data->rotation_magnitude_dps = rotationMagnitude_dps;
+  data->shock_magnitude = shockMagnitude_ms2;
+  data->vibration_magnitude = vibrationMagnitude_dps;
 }
 
 String createThingsBoardPayload() {

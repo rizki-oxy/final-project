@@ -118,3 +118,37 @@ def multisensor():
         "parameters": "surface + shock + vibration",
         "filters": "shock & vibration filters enabled"
     }), 200
+
+@multisensor_bp.route('/offline-data', methods=['POST'])
+def process_offline_data():
+    """Endpoint untuk menerima dan memproses data offline dari ESP32"""
+    data_batch = request.get_json()
+    if not data_batch:
+        return jsonify({"error": "No data received"}), 400
+    
+    print(f"📥 Received {len(data_batch)} offline data points")
+    
+    # Process each data point in a separate thread to not block real-time analysis
+    def process_offline_batch():
+        for data in data_batch:
+            # Add to buffer for analysis
+            data_buffer.add_data(data)
+            
+            # Process shock and vibration
+            shock_result = process_realtime_shock(data)
+            vibration_result = process_realtime_vibration(data)
+        
+        # Trigger analysis if enough data
+        if data_buffer.get_data_count() >= MIN_DATA_POINTS:
+            perform_30s_analysis()
+    
+    # Start processing in background
+    thread = threading.Thread(target=process_offline_batch)
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        "status": "success",
+        "message": f"Processing {len(data_batch)} offline data points",
+        "timestamp": datetime.now().isoformat()
+    }), 200
