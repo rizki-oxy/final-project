@@ -76,7 +76,7 @@ bool gyroCalibrated = false;
 const int CALIBRATION_SAMPLES = 100;
 
 
-const float GYRO_DEAD_ZONE = 1.0;
+const float GYRO_DEAD_ZONE = 0.5;
 
 
 // VARIABEL UNTUK DETEKSI SHOCK & VIBRATION
@@ -194,6 +194,12 @@ void setup() {
     Wire.write(PWR_MGMT_1);
     Wire.write(0);
     Wire.endTransmission(true);
+
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x1C);
+    Wire.write(0x18);
+    Wire.endTransmission(true);
+
     Serial.println("✅ GY-521 sensor initialized!");
     Serial.println("📊 Conversion: ±16g range, ±250°/s range");
     Serial.println("📊 Output: Raw LSB + m/s² + deg/s");
@@ -476,6 +482,8 @@ void calculateShockMagnitude() {
   }
   
   shockMagnitude_ms2 = sum / count;
+
+  if (abs(shockMagnitude_ms2) < GYRO_DEAD_ZONE) shockMagnitude_ms2 = 0;
   
   // Update previous magnitude
   prevAccelMagnitude_ms2 = accelMagnitude_ms2;
