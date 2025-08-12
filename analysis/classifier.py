@@ -4,10 +4,8 @@ from thresholds import (
     VEHICLE_SHOCK_FILTER, VEHICLE_VIBRATION_FILTER, DAMAGE_CLASSIFICATION_3PARAM
 )
 
-# === FUNGSI HELPER ===
-
 def get_surface_change_severity(change_value):
-    """Mendapatkan tingkat keparahan perubahan permukaan"""
+    """dalam cm"""
     abs_change = abs(change_value)
     if abs_change >= SURFACE_CHANGE_THRESHOLDS['major']:
         return 'major'
@@ -18,7 +16,7 @@ def get_surface_change_severity(change_value):
     return 'normal'
 
 def get_shock_severity(shock_value):
-    """Mendapatkan tingkat keparahan guncangan (dalam m/s² - sudah difilter)"""
+    """dalam m/s²"""
     abs_shock = abs(shock_value)
     if abs_shock >= SHOCK_THRESHOLDS['heavy']:
         return 'heavy'
@@ -29,7 +27,7 @@ def get_shock_severity(shock_value):
     return 'normal'
 
 def get_vibration_severity(vibration_value):
-    """Mendapatkan tingkat keparahan getaran (dalam deg/s - sudah dikalibrasi dan difilter)"""
+    """dalam deg/s"""
     abs_vibration = abs(vibration_value)
     if abs_vibration >= VIBRATION_THRESHOLDS['heavy']:
         return 'heavy'
